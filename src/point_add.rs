@@ -1135,15 +1135,22 @@ fn kaliski_iteration(
 
     // ─── STEP 1 ───
     //   a ^= (f=1 AND u[0]=0)
-    //   m[i] ^= (f=1 AND a=0 AND v_w[0]=0)
+    //   m[i] ^= (f=1 AND a=0 AND v_w[0]=0)  [= f AND u[0] AND NOT v_w[0]]
     //   b ^= a; b ^= m[i]
-    mcx2_polar(b, f, true, u[0], false, a_f);
-    // b_f is known-zero at this point (uncomputed in step 5 of the
-    // previous iteration, or initial 0). Borrow it as the mcx3 scratch
-    // instead of allocating a fresh ancilla.
-    mcx3_polar(b, f, true, a_f, false, v_w[0], false, m_i, b_f);
+    //
+    // Shared-intermediate trick: compute z = f AND u[0] once into b_f
+    // (known 0 here), then derive a_f = f XOR z = f AND NOT u[0] via CX,
+    // and update m_i via ccx(z, NOT v_w[0], m_i). Uncompute z, then set
+    // b_f to a_f XOR m_i as before. Saves 1 CCX per iter vs mcx2+mcx3.
+    b.ccx(f, u[0], b_f);                  // b_f = f AND u[0] (z)
+    b.cx(f, a_f);
+    b.cx(b_f, a_f);                       // a_f = f XOR z = f AND NOT u[0]
+    b.x(v_w[0]);
+    b.ccx(b_f, v_w[0], m_i);              // m_i ^= z AND NOT v_w[0]
+    b.x(v_w[0]);
+    b.ccx(f, u[0], b_f);                  // uncompute z: b_f = 0
     b.cx(a_f, b_f);
-    b.cx(m_i, b_f);
+    b.cx(m_i, b_f);                       // b_f = a_f XOR m_i
 
     // ─── STEP 2: with l = u > v_w: a ^= (f AND l AND ¬b); m_i ^= same.
     // Both targets share the same (f, l_gt, ¬b_f) control. Compute the AND
