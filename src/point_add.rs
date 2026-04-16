@@ -583,6 +583,16 @@ fn mod_add_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
     unload_bits(b, &a, bits);
 }
 
+fn mod_add_double_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
+    // acc := acc + 2*bits mod p. Reuse a single loaded copy of the classical
+    // point and walk it through the cheap secp256k1 double/halve pair.
+    let a = load_bits(b, bits);
+    mod_double_inplace_fast(b, &a, p);
+    mod_add_qq_fast(b, acc, &a, p);
+    mod_halve_inplace_fast(b, &a, p);
+    unload_bits(b, &a, bits);
+}
+
 fn mod_sub_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
     // acc -= bits mod p. Uses fast mod_sub_qq via neg+add+neg.
     let a = load_bits(b, bits);
@@ -2374,8 +2384,7 @@ pub fn build() -> Vec<Op> {
     // negate: -(dx - λ² + 2Qx) = λ² - dx - 2Qx = Rx. mod_add_qb is
     // cheaper than mod_sub_qb (1024 vs 1280 per call, saves 512 total).
     mod_mul_sub_qq(b, &tx, &lam, &lam, p);
-    mod_add_qb(b, &tx, &ox, p);
-    mod_add_qb(b, &tx, &ox, p);
+    mod_add_double_qb(b, &tx, &ox, p);
     mod_neg_inplace_fast(b, &tx, p);
 
     // With lam = -λ, this multiply produces ty = -(Ry + Qy).
