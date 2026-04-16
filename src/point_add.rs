@@ -750,6 +750,40 @@ fn cadd_nbit_const(b: &mut B, acc: &[QubitId], c: U256, ctrl: QubitId) {
     b.free_vec(&a);
 }
 
+fn csub_nbit_const_fast(b: &mut B, acc: &[QubitId], c: U256, ctrl: QubitId) {
+    let n = acc.len();
+    let a = b.alloc_qubits(n);
+    for i in 0..n {
+        if bit(c, i) {
+            b.cx(ctrl, a[i]);
+        }
+    }
+    sub_nbit_qq_fast(b, &a, acc);
+    for i in 0..n {
+        if bit(c, i) {
+            b.cx(ctrl, a[i]);
+        }
+    }
+    b.free_vec(&a);
+}
+
+fn cadd_nbit_const_fast(b: &mut B, acc: &[QubitId], c: U256, ctrl: QubitId) {
+    let n = acc.len();
+    let a = b.alloc_qubits(n);
+    for i in 0..n {
+        if bit(c, i) {
+            b.cx(ctrl, a[i]);
+        }
+    }
+    add_nbit_qq_fast(b, &a, acc);
+    for i in 0..n {
+        if bit(c, i) {
+            b.cx(ctrl, a[i]);
+        }
+    }
+    b.free_vec(&a);
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Modular multiplication
@@ -818,29 +852,14 @@ fn mod_double_inplace_fast(b: &mut B, v: &[QubitId], p: U256) {
     let ovf = b.alloc_qubit();
     b.swap(v[n - 1], ovf);
     for i in (0..n - 1).rev() { b.swap(v[i], v[i + 1]); }
-    let mut v_ext: Vec<QubitId> = v.to_vec();
-    v_ext.push(ovf);
     debug_assert_eq!(n, 256);
+    // For secp256k1, p = 2^n - c. After the shift, the old top bit is in
+    // `ovf` and the low register holds T mod 2^n for T = 2*v. If ovf=1 then
+    // T = 2^n + low and T mod p = low + c; otherwise T mod p = low.
     let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1));
-    {
-        let ca = load_const(b, n + 1, c);
-        add_nbit_qq_fast(b, &ca, &v_ext);
-        unload_const(b, &ca, c);
-    }
-    let flag = b.alloc_qubit();
-    b.cx(ovf, flag);
-    b.x(flag);
-    {
-        let ca = b.alloc_qubits(n + 1);
-        for i in 0..n + 1 { if bit(c, i) { b.cx(flag, ca[i]); } }
-        sub_nbit_qq_fast(b, &ca, &v_ext);
-        for i in 0..n + 1 { if bit(c, i) { b.cx(flag, ca[i]); } }
-        b.free_vec(&ca);
-    }
-    b.x(flag);
-    b.cx(flag, ovf);
-    b.cx(v[0], flag);
-    b.free(flag);
+    cadd_nbit_const_fast(b, v, c, ovf);
+    // Result parity equals the old top bit: even if ovf=0, odd if ovf=1.
+    b.cx(v[0], ovf);
     b.free(ovf);
 }
 
@@ -849,30 +868,13 @@ fn mod_double_inplace_fast(b: &mut B, v: &[QubitId], p: U256) {
 fn mod_halve_inplace_fast(b: &mut B, v: &[QubitId], p: U256) {
     let n = v.len();
     let ovf = b.alloc_qubit();
-    let mut v_ext: Vec<QubitId> = v.to_vec();
-    v_ext.push(ovf);
     debug_assert_eq!(n, 256);
+    // If v is odd, then v = low + c for some even `low`; subtract c before
+    // shifting and reinsert the parity bit at the top. If v is even, this is
+    // just an ordinary right shift.
     let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1));
-    // Reverse: recompute flag, undo operations
-    let flag = b.alloc_qubit();
-    b.cx(v[0], flag);
-    b.cx(flag, ovf);
-    b.x(flag);
-    {
-        let ca = b.alloc_qubits(n + 1);
-        for i in 0..n + 1 { if bit(c, i) { b.cx(flag, ca[i]); } }
-        add_nbit_qq_fast(b, &ca, &v_ext);
-        for i in 0..n + 1 { if bit(c, i) { b.cx(flag, ca[i]); } }
-        b.free_vec(&ca);
-    }
-    b.x(flag);
-    b.cx(ovf, flag);
-    b.free(flag);
-    {
-        let ca = load_const(b, n + 1, c);
-        sub_nbit_qq_fast(b, &ca, &v_ext);
-        unload_const(b, &ca, c);
-    }
+    b.cx(v[0], ovf);
+    csub_nbit_const_fast(b, v, c, ovf);
     for i in 0..n - 1 { b.swap(v[i], v[i + 1]); }
     b.swap(v[n - 1], ovf);
     b.free(ovf);
