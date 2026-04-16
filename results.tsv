@@ -107,3 +107,4 @@ timestamp	commit	toffoli	clifford	qubits	ops	correct	notes
 1776378067	e69a39d	8280984.000	43807033.016	3080	61512947	OK	schoolbook squarer for mod_mul_sub_qq
 1776378172	a85389c	8174935.000	42278491.766	3080	59694524	OK	schoolbook for mid mul (ty += lam*tx)
 1776378292	0827456	8027862.000	39909606.844	3336	56843333	OK	schoolbook for pair1 first+second muls
+1776378333	43cf486	7986838.000	39069254.297	3336	55810565	OK	schoolbook for pair2 unadd mul

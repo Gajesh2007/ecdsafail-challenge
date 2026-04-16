@@ -2522,14 +2522,10 @@ pub fn build() -> Vec<Op> {
     mod_neg_inplace_fast(b, &tx, p);                     // tx = -(...)= Rx - Qx
     mod_mul_add_into_acc_schoolbook(b, &ty, &lam, &tx, p); // ty += lam·tx via schoolbook
     with_kal_inv_raw(b, &tx, p, |b, inv_raw| {
-        // MSB-first Horner: end lam = 2^(N-1)·init + inv_raw·ty. Choose init
-        // = -λ·2^N (so 2^(N-1)·init = -λ·2^(2N-1)) by pre-doubling N times
-        // (vs 2N-1 for LSB-first). Saves N-1 = 255 halve ops on lam.
-        for _ in 0..N { mod_double_inplace_fast(b, &lam, p); }
-        for i in (0..N).rev() {
-            if i < N - 1 { mod_double_inplace_fast(b, &lam, p); }
-            cmod_add_qq(b, &lam, inv_raw, ty[i], p);
-        }
+        // Schoolbook approach: pre-double lam to -λ·2^(2N-1), then add
+        // inv_raw·ty mod p = +λ·2^(2N-1) → lam = 0.
+        for _ in 0..(2 * N - 1) { mod_double_inplace_fast(b, &lam, p); }
+        mod_mul_add_into_acc_schoolbook(b, &lam, inv_raw, &ty, p);
         mod_sub_qb(b, &ty, &oy, p);                      // ty = (Ry+Qy) - Qy = Ry
     });
     mod_add_qb(b, &tx, &ox, p);                           // tx = Rx
