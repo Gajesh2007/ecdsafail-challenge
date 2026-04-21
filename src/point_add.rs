@@ -3553,11 +3553,13 @@ fn with_kal_inv_raw<F: FnOnce(&mut B, &[QubitId])>(
     // then re-allocate before backward. Saves n qubits at peak with 0
     // Toffoli cost.
     b.free_vec(&st.v_w);
+    b.free(st.f_flag);
 
     let r_low: Vec<QubitId> = st.r[..n].to_vec();
     body(b, &r_low);
 
-    // Re-alloc v_w at |0> for the backward pass.
+    // Re-alloc at |0> for the backward pass.
+    st.f_flag = b.alloc_qubit();
     st.v_w = b.alloc_qubits(n);
 
     // Explicit backward pass (uses measurement-based uncompute, saves
