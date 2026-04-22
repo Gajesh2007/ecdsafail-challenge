@@ -7,14 +7,21 @@
 //! This file brute-forces a small family of candidate side-information features
 //! to see whether some equally-cheap key collapses the ambiguity even further.
 //!
-//! Result so far: on 300 random secp256k1 trajectories (~108k windows),
-//! the triple of compare bits `(cmp0, cmp1, cmp2)` is by far the best cheap key:
+//! Sequence labels are length-tagged so that short tail windows near algorithm
+//! termination remain distinct from zero-padded full windows.
 //!
-//!   key = (u_low, v_low, cmp0, cmp1, cmp2)
-//!   mean ambiguity ≈ 1.035, max ambiguity = 2.
+//! Result so far: on sampled secp256k1 trajectories, the triple of compare
+//! bits `(cmp0, cmp1, cmp2)` is still the best cheap key we have found.
 //!
-//! This is the strongest classical signal yet that a practical hybrid batched
-//! primitive might only need low bits plus three compare bits.
+//! After fixing a tail-window encoding bug, the corrected picture is:
+//! - `(u_low, v_low, cmp0, cmp1, cmp2)` still wins,
+//! - max ambiguity remains 2,
+//! - but the residual ambiguity is a bit larger than the earlier over-optimistic
+//!   estimate because the final 1-3 tail windows per trajectory must be kept
+//!   distinct from zero-padded full windows.
+//!
+//! The key conclusion survives: low bits plus three compare bits are enough to
+//! collapse the 4-step class search down to a tiny residual ambiguity.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -110,21 +117,24 @@ fn build_rows(seed: &[u8], n_inputs: usize, w: usize, t: usize) -> Vec<Row> {
             if v.is_zero() { break; }
             let mut us = vec![u];
             let mut vs = vec![v];
-            let mut seq_code: u16 = 0;
+            let mut packed_cases: u16 = 0;
+            let mut seq_len: u16 = 0;
             let mut uu = u;
             let mut vv = v;
             for i in 0..t {
                 if vv.is_zero() { break; }
                 let (nu, nv, kc) = kaliski_step_uv(uu, vv);
-                seq_code |= (match kc {
+                packed_cases |= (match kc {
                     super::kaliski_jump::KCase::UEven => 0u16,
                     super::kaliski_jump::KCase::VEven => 1u16,
                     super::kaliski_jump::KCase::UGtV  => 2u16,
                     super::kaliski_jump::KCase::VGtU  => 3u16,
                 }) << (2 * i);
+                seq_len += 1;
                 uu = nu; vv = nv;
                 us.push(uu); vs.push(vv);
             }
+            let seq_code = packed_cases | (seq_len << (2 * t));
             let cmp = |i: usize| -> u8 {
                 if i < us.len() && i < vs.len() { (us[i] > vs[i]) as u8 } else { 0 }
             };
@@ -242,10 +252,11 @@ mod tests {
 
     #[test]
     fn feature_search_top_results() {
-        // Keep under 2 minutes by using 300 sampled trajectories. This still
-        // gives >100k windows and was enough to discover the best combo.
+        // Keep under 2 minutes by using 300 sampled trajectories. This is a
+        // feature-ranking heuristic, not the final ambiguity estimate: the
+        // absolute mean ambiguity is sample-size dependent.
         let res = search_feature_combos(b"kaliski-key-combo-seed-v1", 300, 8, 4);
-        eprintln!("=== Kaliski feature-combo search (w=8,t=4, 300 inputs) ===");
+        eprintln!("=== Kaliski feature-combo search (w=8,t=4, 300-input heuristic) ===");
         for item in res.iter().take(20) {
             eprintln!("combo={:?} classes={} mean={:.3} max={} singletons={}",
                 item.combo, item.classes, item.mean_seq_per_class, item.max_seq_per_class, item.singleton_classes);

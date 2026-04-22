@@ -204,64 +204,150 @@ This is a huge deal:
 - and that a small amount of dynamically-computed side information may be enough
   to select from a very small family of local transition classes.
 
-## New strongest result: brute-force key search finds a nearly-deterministic 3-bit side channel
+## New result: brute-force feature search still ranks `(cmp0, cmp1, cmp2)` best
 
 I added `src/point_add/kaliski_key_search.rs` and brute-forced feature subsets
 of size up to 4 over a reasonable feature family built from:
 - compare bits `cmp0, cmp1, cmp2`,
 - a few low bits of `(u1, v1)` and `(u2, v2)`.
 
-On 300 random secp256k1 trajectories (~108k 4-step windows), the best key found was:
+On a 300-trajectory heuristic sample (~108k 4-step windows), the best key is still:
 
 > **`(u_low, v_low, cmp0, cmp1, cmp2)`**
 
-with statistics:
+with max ambiguity 2.
 
-| key | mean sequences/class | max sequences/class | singleton classes |
-|---|---:|---:|---:|
-| `(u_low, v_low, cmp0, cmp1, cmp2)` | **1.034** | **2** | **80,193** |
+Important correction:
+- that 300-input search is useful for **ranking candidate features**,
+- but the absolute mean ambiguity from that small sample was overly optimistic
+  as a global estimate.
 
-This is dramatically better than the hand-picked `(cmp0, cmp1)` key.
-Interpretation:
-- three compare bits almost completely determine the 4-step branch sequence,
-- the residual ambiguity is only 2-way in the worst observed class,
-- and most classes are effectively deterministic.
+The real breakthrough came from looking at the *shape* of the residual
+ambiguity on the full 10,000-trajectory dataset.
 
-This is the first evidence that a hybrid Kaliski-jump primitive could plausibly
-be driven by:
-- low 8 bits of `(u, v)`
-- plus just **three compare bits**
+## New strongest result: the 125 four-step classes split into 108 bulk classes + 17 tiny tail classes
 
-instead of a large branch-history register.
+I added `src/point_add/kaliski_window_decomp.rs` and decomposed the actual
+`w = 8`, `t = 4` class family over 10,000 real secp256k1 trajectories.
 
-## Current best moonshot conclusion
+### Window-length census
+Out of 3,619,614 observed 4-step windows:
 
-**Conclusion: `hybrid Kaliski-jump is the bet.`**
+| window type | count | fraction |
+|---|---:|---:|
+| full 4-step windows | 3,589,614 | 99.1712% |
+| short windows (last 3 cleanup windows / trajectory) | 30,000 | 0.8288% |
 
-This is now stronger than before.
+Exactly one length-1, one length-2, and one length-3 tail window appears per
+trajectory, i.e. the short windows are a tiny deterministic end effect.
 
-### Why full B-Y replacement is not the best bet
+### Distinct class counts
+The observed 125 classes decompose as:
+
+| class family | count |
+|---|---:|
+| distinct length-4 sequences | 108 |
+| distinct length-3 sequences | 12 |
+| distinct length-2 sequences | 4 |
+| distinct length-1 sequences | 1 |
+| total | **125** |
+
+So the scary-looking 125-class family is really:
+- **108 bulk 4-step classes**, plus
+- only **17 tail classes** near termination.
+
+That is much better news for a real reversible design.
+
+## New strongest result: three compare bits determine the **3-step bulk core exactly**
+
+Using the same key
+
+> **`(u_low, v_low, cmp0, cmp1, cmp2)`**
+
+I measured the residual ambiguity structure of the 4-step family.
+
+### Full 10,000-trajectory results for the 4-step family
+For key `(u_low, v_low, cmp0, cmp1, cmp2)`:
+
+| metric | value |
+|---|---:|
+| key classes observed | 261,870 |
+| mean sequences / key | 1.275 |
+| max sequences / key | 2 |
+| ambiguous key classes | 71,936 |
+| ambiguous windows | 1,120,661 |
+| ambiguous window fraction | 30.9608% |
+
+At first sight, that looks less miraculous than the early 300-input search.
+But the **structure** of the ambiguity is the real moonshot result.
+
+### Residual ambiguity structure
+Among those 71,936 ambiguous key classes:
+- **71,920** are exactly a pair of full 4-step sequences that share the same
+  first 3 steps and differ only in the final odd/odd direction:
+  - `...-UG` vs `...-VG`
+- only **16** ambiguous key classes involve tail windows at all.
+- only **4** ambiguous key classes fail to share a common 3-step prefix, and
+  those are tiny end-of-algorithm tail effects.
+
+Representative high-frequency residual pairs are exactly of the form:
+- `VE-UG-UG-UG  <->  VE-UG-UG-VG`
+- `UE-VG-VG-UG  <->  UE-VG-VG-VG`
+- `UG-UE-UG-UG  <->  UG-UE-UG-VG`
+- `VG-VE-VG-UG  <->  VG-VE-VG-VG`
+
+So for almost the entire inversion trajectory, the key `(low, cmp0, cmp1, cmp2)`
+does **not** leave a complicated residual search; it leaves only the **last
+odd/odd branch bit** unresolved.
+
+### Exact 3-step bulk core
+The most actionable number is this:
+
+| object | distinct classes |
+|---|---:|
+| all observed 3-step prefixes | 41 |
+| full-window 3-step prefixes only | **36** |
+
+And on **full 4-step windows**, the key `(u_low, v_low, cmp0, cmp1, cmp2)`
+determines the 3-step prefix **exactly**.
+
+This is the clearest prototype path found so far.
+
+## Updated current best moonshot conclusion
+
+**Conclusion: `hybrid Kaliski-jump` is still the bet, but the best first
+prototype target is no longer “exact 4-step lookup.” It is an _exact 3-step
+bulk core_ plus a cheap residual step / tail fallback.**
+
+### Why full B-Y replacement is still not the best bet
 Full BY jumpdivsteps2 still has two major problems:
 1. matrix entries hit the full `2^w` growth;
 2. coefficient tracking and cleanup are all-new machinery.
 
 So a *full* B-Y replacement remains very high-risk.
 
-### Why the new key-search result matters
-The exact histogram showed the local transition family is small.
-The ambiguity survey showed compare bits collapse the family.
-The brute-force key search now shows that **three compare bits are almost
-sufficient to identify the exact 4-step branch sequence**.
+### Why the new decomposition result matters
+The old story was:
+- 125 four-step classes,
+- three compare bits almost collapse them.
 
-That means a plausible hybrid primitive could work like:
-1. read `(u_low, v_low)`,
-2. compute `cmp0, cmp1, cmp2`,
-3. lookup 1 of a tiny set of candidate 4-step transforms,
-4. if needed, resolve a residual 2-way ambiguity with one extra cheap bit.
+The new, much stronger story is:
+- the 125 classes split into **108 bulk + 17 tail**,
+- 99.17% of actual windows are bulk 4-step windows,
+- and on those bulk windows, `(u_low, v_low, cmp0, cmp1, cmp2)` identifies the
+  **first 3-step transform exactly**.
 
-That is the most concrete reversible interface I have found so far.
+That means a practical hybrid primitive can plausibly look like:
+1. compute `(u_low, v_low, cmp0, cmp1, cmp2)`,
+2. lookup one of only **36** exact bulk 3-step transforms,
+3. apply that exact 3-step batched transform to both `(u, v)` and `(r, s)`,
+4. do one ordinary final Kaliski micro-step,
+5. use a tiny separate fallback for the last 3 windows near `v = 0`.
 
-## New classical proposal: hybrid Kaliski-jump
+That is a much cleaner reversible interface than a monolithic exact 4-step
+selector.
+
+## New classical proposal: exact 3-step hybrid Kaliski core
 
 ### Model
 Standard Kaliski / binary almost-inverse update on `(u, v)` has four branch
@@ -281,51 +367,54 @@ an integer 2×2 matrix `P_t` with
 (u_t, v_t)^T = (1 / 2^t) · P_t · (u_0, v_0)^T.
 ```
 
-The classical question is: along actual secp256k1 trajectories, keyed by low
-`w` bits of `(u, v)` and a tiny amount of extra branch metadata, how many
-possible `P_t` arise?
-
 ### Best current empirical lead
-For `w = 8`, `t = 4`:
-- only **125** joint `(uv, rs)` transition classes globally,
-- key `(u_low, v_low, cmp0, cmp1, cmp2)` gives mean ambiguity **1.034**,
-- worst observed ambiguity only **2**,
-- matrices bounded by `|entry| ≤ 16`.
+For `w = 8`:
+- the full `t = 4` family has only **125** joint classes,
+- but that family decomposes into **108 bulk classes + 17 tail classes**,
+- the full-window 3-step prefix family has only **36** classes,
+- and `(u_low, v_low, cmp0, cmp1, cmp2)` selects that 3-step prefix exactly on
+  99.17% of actual windows.
 
-This is currently the most actionable structural lead toward reducing the 81%
+This now looks like the most actionable structural lead toward reducing the 81%
 inversion budget.
 
 ## Proposed next sessions
 
-### P1. Enumerate the exact 125 four-step joint classes
-For `t = 4`, produce:
+### P1. Enumerate the exact 36 bulk 3-step classes
+For the full-window bulk family, produce:
 - canonical representative branch sequences,
 - the exact `(uv_mat, rs_mat)` pair,
-- the low-bit preconditions / compare-bit conditions under which they occur.
+- the low-bit / compare-bit conditions under which each occurs.
 
-This is the final classical step before a real reversible design sketch.
+This is now the cleanest classical-to-reversible handoff point.
 
-### P2. Build a concrete reversible selector cost model
-Now that the best key is effectively
-`(u_low, v_low, cmp0, cmp1, cmp2)` with max ambiguity 2,
-we should estimate the true reversible cost of:
-- forming the three compare bits,
-- indexing the candidate class set,
-- resolving the residual 2-way ambiguity.
+### P2. Build a reversible cost model for the exact 3-step core
+Estimate the real cost of:
+- forming `cmp0, cmp1, cmp2`,
+- indexing 1 of 36 bulk transforms,
+- applying the corresponding `(uv, rs)` matrix pair,
+- then doing one ordinary residual Kaliski step.
 
-### P3. Compare `t = 4` vs `t = 6`
-`t = 4` has tiny matrices and nearly-deterministic keys.
-`t = 6` has larger matrices and larger class ambiguity, but fewer windows.
-Current evidence strongly favors `t = 4` as the first real prototype.
+This should be compared directly against 3 ordinary Kaliski micro-steps.
+
+### P3. Design the tiny tail fallback
+Because every trajectory has exactly three short terminal windows, we can likely
+handle them with a separate, tiny cleanup path rather than bloating the bulk
+primitive.
+
+### P4. Revisit `t = 4` exact selection only if needed
+An exact 4-step selector is no longer the best first target. It is now a
+second-stage refinement after the 3-step bulk core is costed.
 
 ## Bottom line
 
 The strongest current research judgement is:
 
-> The best moonshot is **hybrid Kaliski-jump batching** over 4-step windows,
-> keyed by low bits plus three compare bits, because the exact local transition
-> family is tiny on both the state side `(u, v_w)` and the coefficient side
-> `(r, s)`, and the branch-sequence ambiguity is almost gone.
+> The best moonshot is **hybrid Kaliski-jump batching**, but the concrete first
+> prototype should be an **exact 3-step bulk primitive** keyed by
+> `(u_low, v_low, cmp0, cmp1, cmp2)`, followed by one ordinary step and a tiny
+> tail fallback.
 
-That's still novel research, but unlike the other moonshots, it now has
-clear empirical support directly tied to the 81%-of-budget hot path.
+That is still novel research, but it is now tied to a very concrete empirical
+structure in the 81%-of-budget hot path, rather than just a vague hope that a
+4-step lookup will be small enough.

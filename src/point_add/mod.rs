@@ -64,6 +64,7 @@ pub mod by;
 pub mod kaliski_jump;
 pub mod kaliski_jump_extra;
 pub mod kaliski_key_search;
+pub mod kaliski_window_decomp;
 pub mod test_timeout;
 
 struct B {
