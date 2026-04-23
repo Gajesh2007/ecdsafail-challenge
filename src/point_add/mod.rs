@@ -3102,7 +3102,7 @@ fn bulk_prefix_safe_iters() -> usize {
 fn bulk_prefix_enabled() -> bool {
     match std::env::var("KAL_BULK3_EXPERIMENT") {
         Ok(v) => v != "0",
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
