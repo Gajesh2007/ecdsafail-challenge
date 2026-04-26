@@ -4108,8 +4108,15 @@ fn kaliski_iteration_bulk_prefix3(
     b.cx(m_i, b_f); // b_f = a_f xor m_i
 
     b.set_phase("kal_bulk_step2");
+    // Late-iter comparator truncation: bitlen(u)+bitlen(v_w) ≤ 2n-iter_idx so
+    // high bits are 0 and don't affect u > v_w.
+    let cmp_width = if iter_idx < u.len() {
+        u.len()
+    } else {
+        2 * u.len() - iter_idx
+    };
     let l_gt = b.alloc_qubit();
-    with_gt(b, u, v_w, l_gt, |b| {
+    with_gt(b, &u[..cmp_width], &v_w[..cmp_width], l_gt, |b| {
         b.x(b_f);
         let t = b.alloc_qubit();
         b.ccx(l_gt, b_f, t);
@@ -4817,8 +4824,10 @@ fn kaliski_iteration_bulk_prefix3_backward(
 
     // Reverse STEP 2.
     b.set_phase("bk_bulk_step2");
+    // Mirror forward bulk STEP2 comparator truncation.
+    let cmp_width = if iter_idx < n { n } else { 2 * n - iter_idx };
     let l_gt = b.alloc_qubit();
-    with_gt(b, u, v_w, l_gt, |b| {
+    with_gt(b, &u[..cmp_width], &v_w[..cmp_width], l_gt, |b| {
         b.x(b_f);
         let t = b.alloc_qubit();
         b.ccx(l_gt, b_f, t);
