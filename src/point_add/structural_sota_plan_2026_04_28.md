@@ -7,7 +7,7 @@ matching Google's secp256k1 point-add frontier, not a micro-optimization list.
 
 Current committed baseline after the last in-flight retune:
 
-- **4,132,750 Toffoli**
+- **4,111,918 Toffoli**
 - **2716 qubits**
 - exact / phase-clean under the 24-seed gate and checks
 
@@ -18,8 +18,8 @@ Google/ZKP targets:
 
 So the real gaps are:
 
-- **−1.43M Toffoli** to low-qubit
-- **−2.03M Toffoli** to low-gate
+- **−1.41M Toffoli** to low-qubit
+- **−2.01M Toffoli** to low-gate
 - **−1541 qubits** to low-qubit
 
 ## 1. The Toffoli gap is one inversion-sized object
@@ -31,7 +31,7 @@ Measured decomposition of the current design:
 | Kaliski invocation #1 (`with_kal_inv_raw`, fwd+body+bwd scale excluded) | ~1.60M |
 | Kaliski invocation #2 | ~1.59M |
 | non-Kaliski scaffold (muls, scale correction, Solinas, constants) | ~0.94M |
-| total | ~4.13M |
+| total | ~4.11M |
 
 Therefore a SOTA-grade design must do one of exactly two things:
 
@@ -745,8 +745,8 @@ The first whole-point budget with this primitive is now explicit in
 `scaled_by_div_point_add_budget_has_sota_margin_if_history_workspace_solved`:
 
 ```text
-current total                   = 4,132,750
-remove two Kaliski invocations  ≈ -3,190,000
+current total                   = 4,111,918
+remove two Kaliski invocations  ≈ -3,169,168
 keep non-inversion scaffold     ≈    942,750
 scaled BY DIV (2046*560)        ≈  1,145,760
 branch/decode margin            ≈    150,000
@@ -886,6 +886,17 @@ The first savings-capable implementation must either:
    branch generator.
 
 This is the line between a benchmark smoke scaffold and a real SOTA candidate.
+
+Default exact path note: `BULK_PREFIX_SAFE_ITERS` was raised from 313 to 375
+after env sweeps found 375 phase-clean and 377/380/390 phase-unsafe. This gives
+a real but small exact improvement:
+
+```text
+old default: 4,132,750 Toffoli @2716q
+new default: 4,111,918 Toffoli @2716q
+```
+
+It is folded into the baseline but is not a SOTA route.
 
 Approximate Kaliski cutoff is not a shortcut under the current phase-clean
 contract. Env-gated threshold probes (`KAL_PAIR1_ITERS`, `KAL_PAIR2_ITERS`) show
