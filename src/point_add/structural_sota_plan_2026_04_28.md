@@ -948,10 +948,34 @@ max sampled compute                 = 329,595 CCX
 ```
 
 The peak of the naive standalone cost circuit is high (`3424q`) because it
-allocates old/new row buffers, but the Toffoli economics are SOTA-shaped. The
-required next object is therefore very precise: a **selected/fixed-matrix
+allocates old/new row buffers, but the Toffoli economics are SOTA-shaped.
+`consumed_lowword_window_has_exact_quotient_update_and_pattern_inverse` pins down
+the self-cleaning algebra for such a window. With `f=f_low+2^16 F` and
+`g=g_low+2^16 G`, a selected matrix `P` gives
+
+```text
+(f',g') = P·(F,G) + (P·(f_low,g_low))/2^16
+pattern + full quotient state reconstructs old state by sign(det(P))·adj(P)
+max sampled lowword quotient correction |q| = 32,757
+```
+
+So the consumed low word does not need a separate 32-bit payload; the 16 branch
+bits are exactly the determinant-history payload if the quotient state is kept
+with enough precision. A tempting fixed-precision shortcut is dead, though:
+`fixed_precision_2adic_denominator_branch_curve` shows that 64/96/128/.../256-bit
+truncated denominator states predict roughly that many initial steps and then
+mismatch essentially every 560-step trajectory:
+
+```text
+bits=64  mismatch_rate=1.0000 mean_first≈65
+bits=128 mismatch_rate=1.0000 mean_first≈129
+bits=256 mismatch_rate=1.0000 mean_first≈257
+```
+
+Thus field-width truncated branch generation is not a 1% approximate escape;
+the required next object is still very precise: a **selected/fixed-matrix
 window update** with algebraic sharing and production scheduling, not per-bit
-full-width replay.
+full-width replay or fixed-width truncation.
 
 The first savings-capable implementation must either:
 

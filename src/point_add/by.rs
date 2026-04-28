@@ -4081,6 +4081,204 @@ mod tests {
         );
     }
 
+    fn low_mask_u256_for_test(bits: usize) -> U256 {
+        if bits >= 256 {
+            U256::MAX
+        } else if bits == 0 {
+            U256::ZERO
+        } else {
+            (U256::from(1u64) << bits).wrapping_sub(U256::from(1u64))
+        }
+    }
+
+    fn truncate_sint_bits_for_test(x: SInt, bits: usize) -> SInt {
+        if bits == 0 || x.mag.is_zero() {
+            return SInt::zero();
+        }
+        let mask = low_mask_u256_for_test(bits);
+        let mag_low = x.mag & mask;
+        let residue = if x.neg {
+            if mag_low.is_zero() {
+                U256::ZERO
+            } else if bits >= 256 {
+                U256::ZERO.wrapping_sub(mag_low)
+            } else {
+                ((U256::from(1u64) << bits).wrapping_sub(mag_low)) & mask
+            }
+        } else {
+            mag_low
+        };
+        if residue.is_zero() {
+            return SInt::zero();
+        }
+        let sign_bit = residue.bit(bits - 1);
+        if sign_bit {
+            let mag = if bits >= 256 {
+                U256::ZERO.wrapping_sub(residue)
+            } else {
+                (U256::from(1u64) << bits).wrapping_sub(residue)
+            };
+            SInt { neg: true, mag }
+        } else {
+            SInt { neg: false, mag: residue }
+        }
+    }
+
+    fn divstep_sint_state_truncated_for_test(delta: &mut i64, f: &mut SInt, g: &mut SInt, bits: usize) {
+        divstep_sint_state(delta, f, g);
+        *f = truncate_sint_bits_for_test(*f, bits);
+        *g = truncate_sint_bits_for_test(*g, bits);
+    }
+
+    #[test]
+    fn fixed_precision_2adic_denominator_branch_curve() {
+        // A possible escape from the full 560-bit branch generator is to keep a
+        // fixed truncated 2-adic denominator state and accept a small branch
+        // mismatch rate. This probe measures the precision curve directly on
+        // secp256k1 samples. Result: fixed precision predicts roughly that many
+        // initial steps and then loses essentially every 560-step trajectory;
+        // field-width denominator state is not an approximate shortcut.
+        const STEPS: usize = 560;
+        const SAMPLES: usize = 800;
+        let precisions = [64usize, 96, 128, 160, 192, 224, 256];
+        let mut sampler = Sampler::new(b"by-fixed-precision-branch-curve-v1", SECP256K1_P);
+        let mut failure_rates = Vec::with_capacity(precisions.len());
+        for &bits in &precisions {
+            let mut failures = 0usize;
+            let mut first_mismatch_sum = 0usize;
+            for _ in 0..SAMPLES {
+                let x = sampler.next();
+                let mut d_full = 1i64;
+                let mut f_full = SInt::from_u(SECP256K1_P);
+                let mut g_full = SInt::from_u(x);
+                let mut d_local = 1i64;
+                let mut f_local = truncate_sint_bits_for_test(f_full, bits);
+                let mut g_local = truncate_sint_bits_for_test(g_full, bits);
+                let mut first_bad = None;
+                for step in 0..STEPS {
+                    let odd_full = g_full.bit0();
+                    let a_full = d_full > 0 && odd_full;
+                    let odd_local = g_local.bit0();
+                    let a_local = d_local > 0 && odd_local;
+                    if first_bad.is_none() && (odd_full != odd_local || a_full != a_local) {
+                        first_bad = Some(step);
+                    }
+                    divstep_sint_state(&mut d_full, &mut f_full, &mut g_full);
+                    divstep_sint_state_truncated_for_test(&mut d_local, &mut f_local, &mut g_local, bits);
+                }
+                if let Some(step) = first_bad {
+                    failures += 1;
+                    first_mismatch_sum += step;
+                }
+            }
+            let rate = failures as f64 / SAMPLES as f64;
+            let mean_first = if failures == 0 { STEPS as f64 } else { first_mismatch_sum as f64 / failures as f64 };
+            failure_rates.push(rate);
+            eprintln!(
+                "BY fixed-precision branch curve: bits={bits}, mismatch_rate={rate:.4}, mean_first_mismatch={mean_first:.1}"
+            );
+        }
+        assert!(failure_rates[0] > 0.99, "64-bit branch state unexpectedly accurate");
+        assert!(failure_rates[6] > 0.99, "256-bit branch state would be an approximate shortcut; revisit");
+    }
+
+    fn divstep_i128_exact_for_test(delta: &mut i64, f: &mut i128, g: &mut i128) {
+        let odd = (*g & 1) != 0;
+        if *delta > 0 && odd {
+            let nf = *g;
+            let ng = (*g - *f) / 2;
+            *delta = 1 - *delta;
+            *f = nf;
+            *g = ng;
+        } else if odd {
+            *g = (*g + *f) / 2;
+            *delta = 1 + *delta;
+        } else {
+            *g /= 2;
+            *delta = 1 + *delta;
+        }
+    }
+
+    #[test]
+    fn consumed_lowword_window_has_exact_quotient_update_and_pattern_inverse() {
+        // This is the algebraic shape of a self-cleaning denominator window.
+        // The low W bits choose the branch pattern / matrix. After W divsteps
+        // the full signed denominator has been divided by 2^W, so the active
+        // high quotient state is
+        //
+        //     high' = P·high + (P·low)/2^W.
+        //
+        // The W-bit pattern plus the quotient state is reversible because
+        // old = sign(det(P))·adj(P)·new. Thus a production denominator window
+        // does not need to preserve the consumed low words separately; the
+        // branch pattern is exactly the determinant-history payload.
+        const W: usize = 16;
+        const SAMPLES: usize = 5_000;
+        let scale = 1i128 << W;
+        let mut hasher = sha3::Shake128::default();
+        hasher.update(b"by-consumed-lowword-window-v1");
+        let mut reader = hasher.finalize_xof();
+        let mut buf = [0u8; 32];
+        let mut max_abs_q = 0i128;
+        let mut max_abs_new = 0i128;
+        for _ in 0..SAMPLES {
+            reader.read(&mut buf);
+            let mut f0 = (i128::from_le_bytes(buf[0..16].try_into().unwrap()) >> 40) | 1;
+            let mut g0 = i128::from_le_bytes(buf[16..32].try_into().unwrap()) >> 40;
+            // Keep values well inside i128 so products by 16-bit coefficients
+            // cannot overflow; the identity itself is width-independent.
+            f0 %= 1i128 << 86;
+            g0 %= 1i128 << 86;
+            f0 |= 1;
+            let d0 = ((buf[0] as i64) % 41) - 20;
+
+            let low_f = truncate_i128(f0, W);
+            let low_g = truncate_i128(g0, W);
+            let high_f = (f0 - low_f) / scale;
+            let high_g = (g0 - low_g) / scale;
+            let bits = branch_bits_for_lowword_window(W, d0, low_f, low_g);
+            let m = matrix_from_branch_bits(d0, &bits);
+
+            let q0_num = m.m00 * low_f + m.m01 * low_g;
+            let q1_num = m.m10 * low_f + m.m11 * low_g;
+            assert_eq!(q0_num % scale, 0, "row0 low correction not integral");
+            assert_eq!(q1_num % scale, 0, "row1 low correction not integral");
+            let q0 = q0_num / scale;
+            let q1 = q1_num / scale;
+            max_abs_q = max_abs_q.max(q0.abs()).max(q1.abs());
+
+            let split0 = m.m00 * high_f + m.m01 * high_g + q0;
+            let split1 = m.m10 * high_f + m.m11 * high_g + q1;
+            let direct0_num = m.m00 * f0 + m.m01 * g0;
+            let direct1_num = m.m10 * f0 + m.m11 * g0;
+            assert_eq!(direct0_num % scale, 0, "row0 direct update not divisible");
+            assert_eq!(direct1_num % scale, 0, "row1 direct update not divisible");
+            assert_eq!(split0, direct0_num / scale, "split row0 mismatch");
+            assert_eq!(split1, direct1_num / scale, "split row1 mismatch");
+
+            let mut d_run = d0;
+            let mut f_run = f0;
+            let mut g_run = g0;
+            for _ in 0..W {
+                divstep_i128_exact_for_test(&mut d_run, &mut f_run, &mut g_run);
+            }
+            assert_eq!(d_run, m.delta_final, "delta mismatch");
+            assert_eq!(f_run, split0, "full divstep f mismatch");
+            assert_eq!(g_run, split1, "full divstep g mismatch");
+            max_abs_new = max_abs_new.max(f_run.abs()).max(g_run.abs());
+
+            let inv = scaled_inverse_matrix(m, W);
+            let rec_f = inv.m00 * f_run + inv.m01 * g_run;
+            let rec_g = inv.m10 * f_run + inv.m11 * g_run;
+            assert_eq!(rec_f, f0, "pattern+quotient did not reconstruct f");
+            assert_eq!(rec_g, g0, "pattern+quotient did not reconstruct g");
+        }
+        eprintln!(
+            "BY consumed lowword window algebra: samples={SAMPLES}, max_abs_q={max_abs_q}, max_abs_new={max_abs_new}"
+        );
+        assert!(max_abs_q < (1i128 << 17), "lowword quotient correction larger than expected");
+    }
+
     #[test]
     fn tapered_fixed_matrix_denominator_budget_is_sota_shaped_if_selection_solved() {
         // Positive moonshot target: if each 16-step denominator window is
