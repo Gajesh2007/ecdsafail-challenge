@@ -3946,6 +3946,53 @@ mod tests {
         super::super::mod_halve_inplace_fast(b, s, p);
     }
 
+    fn emit_signed_controlled_add_for_test(
+        b: &mut super::super::B,
+        acc: &[super::super::QubitId],
+        a: &[super::super::QubitId],
+        ctrl: super::super::QubitId,
+    ) {
+        let f = b.alloc_qubits(acc.len());
+        for i in 0..acc.len() {
+            b.ccx(ctrl, a[i], f[i]);
+        }
+        super::super::add_nbit_qq_fast(b, &f, acc);
+        for i in 0..acc.len() {
+            let m = b.alloc_bit();
+            b.hmr(f[i], m);
+            b.cz_if(ctrl, a[i], m);
+        }
+        b.free_vec(&f);
+    }
+
+    fn emit_signed_redundant_halve_live_parity_for_test(
+        b: &mut super::super::B,
+        v: &[super::super::QubitId],
+        parity_hist: super::super::QubitId,
+        p: U256,
+    ) {
+        b.cx(v[0], parity_hist);
+        super::super::cadd_nbit_const_fast(b, v, p, parity_hist);
+        emit_arithmetic_shift_right_even_for_test(b, v);
+    }
+
+    fn emit_scaled_by_redundant_signed_microstep_live_parity_for_test(
+        b: &mut super::super::B,
+        r: &[super::super::QubitId],
+        s: &[super::super::QubitId],
+        odd_ctrl: super::super::QubitId,
+        a_ctrl: super::super::QubitId,
+        parity_hist: super::super::QubitId,
+        p: U256,
+    ) {
+        for i in 0..r.len() {
+            super::super::cswap(b, a_ctrl, r[i], s[i]);
+        }
+        emit_twos_complement_cneg_for_test(b, s, a_ctrl);
+        emit_signed_controlled_add_for_test(b, s, r, odd_ctrl);
+        emit_signed_redundant_halve_live_parity_for_test(b, s, parity_hist, p);
+    }
+
     fn emit_scaled_by_controlled_microstep_for_test(
         b: &mut super::super::B,
         r: &[super::super::QubitId],
@@ -5643,6 +5690,201 @@ mod tests {
         );
         assert!(ccx < 35_000, "scaled controlled window too costly");
         assert!(peak < 1_350, "scaled controlled window peak too high");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct SignedWideForTest {
+        neg: bool,
+        mag: U512,
+    }
+
+    fn sw_zero_for_test() -> SignedWideForTest {
+        SignedWideForTest { neg: false, mag: U512::ZERO }
+    }
+
+    fn sw_from_u512_for_test(x: U512) -> SignedWideForTest {
+        SignedWideForTest { neg: false, mag: x }
+    }
+
+    fn sw_add_for_test(a: SignedWideForTest, b: SignedWideForTest) -> SignedWideForTest {
+        if a.mag.is_zero() { return b; }
+        if b.mag.is_zero() { return a; }
+        if a.neg == b.neg {
+            SignedWideForTest { neg: a.neg, mag: a.mag.wrapping_add(b.mag) }
+        } else if a.mag >= b.mag {
+            SignedWideForTest { neg: a.neg, mag: a.mag.wrapping_sub(b.mag) }
+        } else {
+            SignedWideForTest { neg: b.neg, mag: b.mag.wrapping_sub(a.mag) }
+        }
+    }
+
+    fn sw_sub_for_test(a: SignedWideForTest, b: SignedWideForTest) -> SignedWideForTest {
+        sw_add_for_test(a, SignedWideForTest { neg: !b.neg && !b.mag.is_zero(), mag: b.mag })
+    }
+
+    fn sw_half_modp_no_reduce_for_test(mut x: SignedWideForTest, p512: U512) -> SignedWideForTest {
+        if x.mag.bit(0) {
+            x = sw_add_for_test(x, sw_from_u512_for_test(p512));
+        }
+        assert!(!x.mag.bit(0), "wide representative not even before halve");
+        SignedWideForTest { neg: x.neg, mag: x.mag >> 1usize }
+    }
+
+    fn low_u256_from_u512_for_test(x: U512) -> U256 {
+        let limbs = x.as_limbs();
+        U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]])
+    }
+
+    fn sw_mod_p_for_test(x: SignedWideForTest, p: U256) -> U256 {
+        let p512 = u256_to_u512_for_by_tests(p);
+        let mut r = x.mag;
+        while r >= p512 {
+            r = r.wrapping_sub(p512);
+        }
+        if x.neg && !r.is_zero() {
+            low_u256_from_u512_for_test(p512.wrapping_sub(r))
+        } else {
+            low_u256_from_u512_for_test(r)
+        }
+    }
+
+    #[test]
+    fn redundant_signed_scaled_by_replay_avoids_reduction_flags_algebraically() {
+        // Moonshot representation rewrite: skip modular reduction before the
+        // per-step halve.  For any integer representative T of the intended
+        // field value, (T + (T&1)*p)/2 is a valid representative of T/2 mod p.
+        // This deletes the modular-add reduction flag algebraically.  The price
+        // is noncanonical signed representatives and a parity-cleaning problem
+        // for a circuit implementation.
+        let p = SECP256K1_P;
+        let p512 = u256_to_u512_for_by_tests(p);
+        let samples = 2_000usize;
+        let mut sx = Sampler::new(b"by-redundant-signed-x-v1", p);
+        let mut sy = Sampler::new(b"by-redundant-signed-y-v1", p);
+        let mut max_multiple = 0usize;
+        let mut failures = 0usize;
+        let mut parity_true_total = 0usize;
+        let mut parity_step_counts = vec![0usize; 560];
+        for _ in 0..samples {
+            let x = sx.next();
+            let y = sy.next();
+            let mut delta = 1i64;
+            let mut f = SInt::from_u(p);
+            let mut g = SInt::from_u(x);
+            let mut r = sw_zero_for_test();
+            let mut s = sw_from_u512_for_test(u256_to_u512_for_by_tests(addm(y, x, p)));
+            for step in 0..560 {
+                let odd = g.bit0();
+                let a = delta > 0 && odd;
+                if a {
+                    let nr = s;
+                    let t = sw_sub_for_test(s, r);
+                    if t.mag.bit(0) { parity_true_total += 1; parity_step_counts[step] += 1; }
+                    s = sw_half_modp_no_reduce_for_test(t, p512);
+                    r = nr;
+                } else if odd {
+                    let t = sw_add_for_test(s, r);
+                    if t.mag.bit(0) { parity_true_total += 1; parity_step_counts[step] += 1; }
+                    s = sw_half_modp_no_reduce_for_test(t, p512);
+                } else {
+                    if s.mag.bit(0) { parity_true_total += 1; parity_step_counts[step] += 1; }
+                    s = sw_half_modp_no_reduce_for_test(s, p512);
+                }
+                for k in 0..8 {
+                    if r.mag < p512 * U512::from((k + 1) as u64) && s.mag < p512 * U512::from((k + 1) as u64) {
+                        max_multiple = max_multiple.max(k + 1);
+                        break;
+                    }
+                }
+                divstep_sint_state(&mut delta, &mut f, &mut g);
+            }
+            if !g.is_zero() || !(f.is_one_pos() || f.is_one_neg()) {
+                failures += 1;
+                continue;
+            }
+            assert_eq!(sw_mod_p_for_test(s, p), U256::ZERO, "bottom tagged channel not zero mod p");
+            let r_mod = sw_mod_p_for_test(r, p);
+            let plus_one = if f.is_one_pos() { r_mod } else { negm(r_mod, p) };
+            let quotient = subm(plus_one, U256::from(1u64), p);
+            assert_eq!(quotient, mulm(y, fermat_modinv(x, p), p), "redundant signed quotient mismatch");
+        }
+        let fail_rate = failures as f64 / samples as f64;
+        let parity_mean = parity_true_total as f64 / samples as f64;
+        let parity_entropy: f64 = parity_step_counts.iter().map(|&c| {
+            let q = c as f64 / samples as f64;
+            if q <= 0.0 || q >= 1.0 { 0.0 } else { -q * q.log2() - (1.0 - q) * (1.0 - q).log2() }
+        }).sum();
+        eprintln!(
+            "BY redundant signed replay: samples={samples}, failures={failures} ({fail_rate:.4}), max_seen_multiple<={max_multiple}p, parity_mean={parity_mean:.1}, parity_entropy≈{parity_entropy:.1} bits"
+        );
+        assert!(fail_rate <= 0.01, "redundant signed replay convergence tail too high");
+        assert!(max_multiple <= 4, "redundant representatives grow too large for a narrow circuit rewrite");
+    }
+
+    fn sw_twos_for_width_for_test(x: SignedWideForTest, width: usize) -> U512 {
+        if x.mag.is_zero() {
+            U512::ZERO
+        } else if x.neg {
+            (U512::from(1u64) << width).wrapping_sub(x.mag)
+        } else {
+            x.mag
+        }
+    }
+
+    #[test]
+    fn redundant_signed_microstep_is_cheap_if_parity_history_can_be_cleaned() {
+        // Circuit-level probe for the redundant signed replay representation.
+        // It has no modular-reduction comparator and therefore no red flag; it
+        // leaves only the pre-halve parity bit. This is not a clean primitive
+        // yet, but it quantifies the payoff if parity can be cleaned by a range
+        // discipline or fused window schedule.
+        const WIDE: usize = 260;
+        let p = SECP256K1_P;
+        let p512 = u256_to_u512_for_by_tests(p);
+        let mut b = super::super::B::new();
+        let odd = b.alloc_qubit();
+        let a_ctrl = b.alloc_qubit();
+        let parity = b.alloc_qubit();
+        let r = b.alloc_qubits(WIDE);
+        let s = b.alloc_qubits(WIDE);
+        emit_scaled_by_redundant_signed_microstep_live_parity_for_test(&mut b, &r, &s, odd, a_ctrl, parity, p);
+        let ccx = count_ccx(&b.ops);
+        let peak = b.peak_qubits;
+        let num_qubits = b.next_qubit as usize;
+        let num_bits = b.next_bit as usize;
+        let ops = b.ops;
+        let cases = [(false, false, "C"), (true, false, "B"), (true, true, "A")];
+        let mut sx = Sampler::new(b"by-redundant-step-r-v1", p);
+        let mut sy = Sampler::new(b"by-redundant-step-s-v1", p);
+        for &(odd_v, a_v, name) in &cases {
+            for _ in 0..12 {
+                let rv = sw_from_u512_for_test(u256_to_u512_for_by_tests(sx.next()));
+                let sv = sw_from_u512_for_test(u256_to_u512_for_by_tests(sy.next()));
+                let (exp_r, exp_s) = match name {
+                    "A" => (sv, sw_half_modp_no_reduce_for_test(sw_sub_for_test(sv, rv), p512)),
+                    "B" => (rv, sw_half_modp_no_reduce_for_test(sw_add_for_test(sv, rv), p512)),
+                    "C" => (rv, sw_half_modp_no_reduce_for_test(sv, p512)),
+                    _ => unreachable!(),
+                };
+                let mut hasher = sha3::Shake128::default();
+                hasher.update(b"by-redundant-step-sim-v1");
+                let mut xof = hasher.finalize_xof();
+                let mut sim = crate::sim::Simulator::new(num_qubits, num_bits, &mut xof);
+                if odd_v { *sim.qubit_mut(odd) |= 1; }
+                if a_v { *sim.qubit_mut(a_ctrl) |= 1; }
+                set_slice_u512_by(&mut sim, &r, sw_twos_for_width_for_test(rv, WIDE));
+                set_slice_u512_by(&mut sim, &s, sw_twos_for_width_for_test(sv, WIDE));
+                sim.apply(&ops);
+                assert_eq!(get_slice_u512_by(&sim, &r), sw_twos_for_width_for_test(exp_r, WIDE), "r mismatch {name}");
+                assert_eq!(get_slice_u512_by(&sim, &s), sw_twos_for_width_for_test(exp_s, WIDE), "s mismatch {name}");
+            }
+        }
+        let replay560 = ccx * 560;
+        eprintln!(
+            "BY redundant signed live-parity microstep: ccx={ccx}, replay560≈{replay560}, peak={peak}q, width={WIDE}"
+        );
+        assert!(ccx < 1_400, "redundant signed microstep lost the no-reduction payoff");
+        assert!(replay560 < 800_000, "redundant signed replay would not beat fixed-control target even if cleaned");
     }
 
     #[test]

@@ -728,9 +728,40 @@ independent entropy upper    ≈ 436.1 bits
 ```
 
 So a position-list escape is dead; at best they are another compressed history
-bank. This is now the sharp replay moonshot: find a way to clean/absorb those
-flags (possibly during reverse denominator/window cleanup) without paying the
-full post-halve recovery cost.
+bank.
+
+A stronger representation rewrite has now been validated algebraically:
+`redundant_signed_scaled_by_replay_avoids_reduction_flags_algebraically` skips
+modular reduction before every halve. For any signed integer representative `T`,
+
+```text
+T/2 mod p  is represented by  (T + (T&1)*p)/2
+```
+
+This removes the red/reduction flag entirely. On 2,000 secp256k1 tagged-DIV
+samples the redundant signed replay is exact modulo `p`, has zero convergence
+failures, and representatives stayed small:
+
+```text
+max observed representative magnitude <= 2p
+parity_mean                         ≈ 276.5 / 560
+parity entropy upper                ≈ 559 bits
+```
+
+`redundant_signed_microstep_is_cheap_if_parity_history_can_be_cleaned` builds a
+260-bit signed circuit for one step, leaving only the pre-halve parity bit:
+
+```text
+redundant signed live-parity microstep = 1,297 CCX
+560-step replay body                   ≈ 726,320 CCX
+peak                                   = 1,043q
+```
+
+This is below the fixed-control replay target, but the parity bits are dense.
+The moonshot replay problem has therefore split into two concrete options:
+clean/absorb 560 red flags at ~1.00M replay, or move to redundant signed
+representatives and solve an even denser but structurally simpler parity-clean
+problem at ~0.73M replay.
 A production replay therefore needs either (a) keep A controls/live flags until
 the end and clean them globally, or (b) fuse the modular average so the same
 flag is recoverable from later state.
