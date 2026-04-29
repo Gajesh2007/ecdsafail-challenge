@@ -1605,13 +1605,25 @@ pair1: avg_toffoli=4,786,373  qubits=2,972  clean
 pair2: avg_toffoli=4,771,009  qubits=2,969  clean
 ```
 
-The generic prescaler makes the path much worse than default, but the algebraic
-lever is real.  A fast version using the existing measurement-based constant
-multiplier was classically correct but phase-unsafe (`altseed_phase_batches=1`).
+The all-exact prescaler makes the path much worse than default, but the
+algebraic lever is real.  A fast version using the existing measurement-based
+constant multiplier was classically correct but phase-unsafe
+(`altseed_phase_batches=1`).  The mixed diagnostic variant
+`KAL_PRESCALE_PAIR1_MIXED=1` uses exact q-q add/sub but fast modular
+shifts and is clean:
+
+```text
+avg_toffoli=4,223,465
+qubits=2,972
+```
+
+So the phase culprit is the fast q-q add/sub in constant multiplication, not the
+fast double/halve scale walk.  This mixed prescaler is still ~111k above the
+true default path, but it is close enough to sharpen the target.
 
 Decision: keep this as a narrow future primitive target only.  A useful
 production version requires a secp256k1-specific phase-clean shifted-add
 prescaler for `2^iters mod p` (e.g. `2^407 = 2^151(2^32+977) mod p`) costing
-well under ~50k Toffoli per compute/uncompute side and ideally folded into the
-Kaliski `v_w` initialization so it does not add a persistent n-bit denominator
-copy.  Without that primitive, scale absorption is not SOTA-relevant.
+well under the current mixed compute+uncompute overhead and ideally folded into
+the Kaliski `v_w` initialization so it does not add a persistent n-bit
+denominator copy.  Without that primitive, scale absorption is not SOTA-relevant.

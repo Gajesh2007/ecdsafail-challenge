@@ -718,10 +718,23 @@ qubits      = 2,969
 clean       = yes
 ```
 
-The result is much worse than default because the generic phase-clean constant
-multiplier computes `2^407 mod p` by 183 modular doublings/halvings plus shifted
-adds, and it also keeps an extra scaled denominator register live.  The earlier
-fast version was classically correct but phase-unsafe:
+The all-exact result is much worse than default because the generic
+phase-clean constant multiplier computes `2^407 mod p` by 183 modular
+ doublings/halvings plus shifted adds, and it also keeps an extra scaled
+denominator register live.  A mixed variant then isolated the phase culprit:
+use exact q-q add/sub at the sparse constant bits, but keep fast modular
+double/halve for the scale walk.
+
+```text
+KAL_PRESCALE_PAIR1_MIXED=1
+avg_toffoli = 4,223,465
+qubits      = 2,972
+clean       = yes
+```
+
+This is only ~111k above the default exact path and ~563k below the all-exact
+prescaler, proving the fast modular shifts are phase-safe here and the earlier
+fast version failed because of the fast q-q add/sub in the constant multiplier:
 
 ```text
 KAL_PRESCALE_PAIR1=1
