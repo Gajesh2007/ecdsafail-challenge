@@ -703,6 +703,60 @@ mod tests {
         }
     }
 
+    fn count_ccx_for_jump_test(ops: &[crate::circuit::Op]) -> usize {
+        ops.iter()
+            .filter(|o| matches!(o.kind, crate::circuit::OperationType::CCX | crate::circuit::OperationType::CCZ))
+            .count()
+    }
+
+    fn emit_variable_coeff_acc_lower_bound_for_jump_test(
+        b: &mut super::super::B,
+        src: &[super::super::QubitId],
+        coeff: &[super::super::QubitId],
+        acc: &[super::super::QubitId],
+    ) {
+        for (shift, &ctrl) in coeff.iter().enumerate() {
+            super::super::cucc_add_ctrl(b, src, &acc[shift..shift + src.len()], ctrl);
+        }
+    }
+
+    #[test]
+    fn selected_matrix_variable_coeff_lower_bound_kills_hybrid_kaliski_windows() {
+        // A matrix-hint Kaliski window only becomes a Toffoli route if applying
+        // the selected UV/RS matrices is cheaper than replaying microsteps.
+        // Even before QROM/equality controls, sign handling, output cleanup,
+        // and denominator/coefficient old-register cleanup, quantum-selected
+        // row formation is already at/above the required per-window budget.
+        const WIDTH: usize = 257;
+        for &(t, coeff_bits) in &[(4usize, 5usize), (8, 9), (16, 17)] {
+            let mut b = super::super::B::new();
+            let src0 = b.alloc_qubits(WIDTH);
+            let src1 = b.alloc_qubits(WIDTH);
+            let coeffs = (0..8).map(|_| b.alloc_qubits(coeff_bits)).collect::<Vec<_>>();
+            let accs = (0..4).map(|_| b.alloc_qubits(WIDTH + coeff_bits)).collect::<Vec<_>>();
+            let start = b.ops.len();
+            // Four selected coeff*source terms update one pair; another four
+            // update the coefficient pair. This is a row-formation lower bound
+            // for the two Kaliski pairs and omits all selection/QROM/cleanup.
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src0, &coeffs[0], &accs[0]);
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src1, &coeffs[1], &accs[0]);
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src0, &coeffs[2], &accs[1]);
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src1, &coeffs[3], &accs[1]);
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src0, &coeffs[4], &accs[2]);
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src1, &coeffs[5], &accs[2]);
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src0, &coeffs[6], &accs[3]);
+            emit_variable_coeff_acc_lower_bound_for_jump_test(&mut b, &src1, &coeffs[7], &accs[3]);
+            let ccx = count_ccx_for_jump_test(&b.ops[start..]);
+            let windows = (407 + t - 1) / t;
+            let invocation_lower = ccx * windows;
+            eprintln!(
+                "hybrid Kaliski selected-matrix lower bound: t={t}, coeff_bits={coeff_bits}, window_ccx={ccx}, windows={windows}, invocation_lower={invocation_lower}, peak={}q",
+                b.peak_qubits
+            );
+            assert!(invocation_lower > 900_000, "selected Kaliski matrix route may still hit 0.9M/invocation; synthesize it");
+        }
+    }
+
     #[test]
     fn hybrid_kaliski_window_survey_test() {
         for &(w, t) in &[(6usize, 4usize), (8usize, 4usize), (8usize, 6usize)] {

@@ -419,6 +419,26 @@ So a forward-only self-cleaning Kaliski cannot simply uncompute each branch by
 looking at the live post-state.  It needs explicit history, a different state
 invariant, or an approximate exceptional-set argument.
 
+### Jumped Kaliski matrix route hard gate
+
+A separate two-inversion route was Kaliski windowing: store short matrix hints
+and apply selected `t`-step matrices to `(u,v)` and `(r,s)`.  The arithmetic
+intensity model already looked suspicious; `selected_matrix_variable_coeff_lower_bound_kills_hybrid_kaliski_windows`
+now adds the selected-coefficient lower bound with actual controlled-add
+primitives.  Even before QROM/equality controls, signs, output cleanup, and
+old-register cleanup:
+
+```text
+t=4:  window_ccx=41,040   windows=102  invocation_lower=4,186,080
+t=8:  window_ccx=73,872   windows=51   invocation_lower=3,767,472
+t=16: window_ccx=139,536  windows=26   invocation_lower=3,627,936
+```
+
+The target for a two-inversion SOTA route is about `0.9M` per invocation.  So
+QROM-selected Kaliski matrix application is dead with current arithmetic.  A
+revival would need to avoid variable coefficients entirely, not just pick better
+window sizes.
+
 ### Approximate-tolerant tag breakthrough: seed with `y+x`
 
 User clarified that **~1% total failure is tolerable**. This makes a tag viable,

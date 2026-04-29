@@ -212,9 +212,22 @@ instead of a low-state-keyed short hint, sampled distinct matrices explode:
 So the qubit compression requires a low-state-keyed QROM/table. It is not a
 free history encoding. The next synthesis must include that QROM/control cost.
 
-Next concrete work: synthesize/lower-bound selected matrix application for
-`t=4..16` with QROM/control costs included. If it cannot exploit cswap deletion
-strongly enough, move to BY/divstep or a different DIV transform.
+Follow-up hard gate: `selected_matrix_variable_coeff_lower_bound_kills_hybrid_kaliski_windows`
+adds the missing selected-coefficient lower bound.  Even omitting QROM/equality
+controls, signs, output cleanup, and old-register cleanup, variable-coefficient
+row formation for the two Kaliski pairs costs:
+
+```text
+t=4:  window_ccx=41,040   windows=102  invocation_lower=4,186,080
+t=8:  window_ccx=73,872   windows=51   invocation_lower=3,767,472
+t=16: window_ccx=139,536  windows=26   invocation_lower=3,627,936
+```
+
+This is above the entire current Kaliski invocation, not near the needed
+~0.9M/invocation.  Therefore generic selected-matrix Kaliski windows are dead
+with current arithmetic.  Any Kaliski-window revival must avoid quantum variable
+coefficients entirely (e.g. fixed-control microprograms or a fundamentally
+shared algebra), not just QROM-select a matrix.
 
 ### BY/divstep jump update (new stronger candidate)
 
