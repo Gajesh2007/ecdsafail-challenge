@@ -812,4 +812,6 @@ clean       = yes
 ```
 
 So direct cadd is useful only as an env-gated tested tool; it does not improve
-the default Toffoli/qubit point.
+the default Toffoli/qubit point.  Combining both direct cadd and csub under the
+conservative prefix is clean at `4,130,602 @ 2715q` with `29,250,534` emitted
+ops; this is a low-emitted-op/qubit tradeoff, not a SOTA path.

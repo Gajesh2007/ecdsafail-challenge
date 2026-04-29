@@ -1691,7 +1691,19 @@ clean       = yes
 
 So keep only the halve flag as the useful validated low-qubit tradeoff.  Direct
 cadd is an env-gated tested primitive, but it gives no qubit reduction and needs
-a less aggressive bulk prefix, so it is not a default-path optimization.
+a less aggressive bulk prefix, so it is not a default-path optimization.  Both
+direct cadd+csub together under `KAL_BULK3_ITERS=370` are also clean:
+
+```text
+KAL_DIRECT_CONST_HALVE=1 KAL_DIRECT_CONST_DOUBLE=1 KAL_BULK3_ITERS=370
+avg_toffoli = 4,130,602
+qubits      = 2,715
+emitted_ops = 29,250,534
+clean       = yes
+```
+
+This is useful only for low-emitted-op / low-qubit tradeoff work (`-1` qubit,
+`-1.5M` emitted ops, `+18,684` Toffoli versus default).
 
 Default exact path after adding the env-gated primitive remains unchanged:
 
