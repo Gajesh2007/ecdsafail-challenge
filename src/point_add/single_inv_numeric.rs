@@ -3570,6 +3570,31 @@ mod tests {
         local_count_ccx_for_plusminus_cost(&b.ops[start..])
     }
 
+    fn emit_trailing_zero_active_chain_history_for_plusminus(
+        b: &mut super::super::B,
+        d: &[super::super::QubitId],
+        active: &[super::super::QubitId],
+        hist: &[super::super::QubitId],
+    ) {
+        assert_eq!(active.len(), d.len() + 1);
+        assert_eq!(hist.len(), d.len());
+        b.x(active[0]);
+        for j in 0..d.len() {
+            b.x(d[j]);
+            b.ccx(active[j], d[j], active[j + 1]);
+            b.x(d[j]);
+        }
+        for j in 0..d.len() {
+            b.cx(active[j + 1], hist[j]);
+        }
+        for j in (0..d.len()).rev() {
+            b.x(d[j]);
+            b.ccx(active[j], d[j], active[j + 1]);
+            b.x(d[j]);
+        }
+        b.x(active[0]);
+    }
+
     fn trailing_zero_active_chain_cost_for_plusminus(width: usize) -> usize {
         // Improved observation: active[j+1] itself is the unary-one bit for
         // position j.  If the active chain is the history payload, no separate
@@ -3578,18 +3603,9 @@ mod tests {
         let mut b = super::super::B::new();
         let d = b.alloc_qubits(width);
         let active = b.alloc_qubits(width + 1);
-        b.x(active[0]);
+        let hist = b.alloc_qubits(width);
         let start = b.ops.len();
-        for j in 0..width {
-            b.x(d[j]);
-            b.ccx(active[j], d[j], active[j + 1]);
-            b.x(d[j]);
-        }
-        for j in (0..width).rev() {
-            b.x(d[j]);
-            b.ccx(active[j], d[j], active[j + 1]);
-            b.x(d[j]);
-        }
+        emit_trailing_zero_active_chain_history_for_plusminus(&mut b, &d, &active, &hist);
         local_count_ccx_for_plusminus_cost(&b.ops[start..])
     }
 
@@ -3646,6 +3662,46 @@ mod tests {
             }
         }
         U512::from_le_slice(&bytes)
+    }
+
+    #[test]
+    fn plusminus_active_chain_unary_generator_circuit_is_clean() {
+        // Actual reversible generator for the unary shift history used by the
+        // plus-minus parser.  It computes the active prefix chain, copies it to
+        // history, and reverses the chain, so all work bits are clean and there
+        // is no measurement phase.
+        use sha3::digest::{ExtendableOutput, Update};
+        const W: usize = 16;
+        let mut b = super::super::B::new();
+        let d = b.alloc_qubits(W);
+        let active = b.alloc_qubits(W + 1);
+        let hist = b.alloc_qubits(W);
+        let start = b.ops.len();
+        emit_trailing_zero_active_chain_history_for_plusminus(&mut b, &d, &active, &hist);
+        let ccx = local_count_ccx_for_plusminus_cost(&b.ops[start..]);
+        let peak = b.peak_qubits;
+        let num_qubits = b.next_qubit as usize;
+        let num_bits = b.next_bit as usize;
+        let ops = b.ops;
+        for val in 0u64..1024u64 {
+            let mut hasher = sha3::Shake128::default();
+            hasher.update(b"plusminus-active-chain-generator-circuit-v1");
+            let mut xof = hasher.finalize_xof();
+            let mut sim = crate::sim::Simulator::new(num_qubits, num_bits, &mut xof);
+            set_slice_u512_pm(&mut sim, &d, U512::from(val));
+            sim.apply(&ops);
+            let tz = if val == 0 { W } else { (val.trailing_zeros() as usize).min(W) };
+            let expected = if tz == W { (1u64 << W) - 1 } else { (1u64 << tz) - 1 };
+            assert_eq!(get_slice_u512_pm(&sim, &hist).as_limbs()[0] & ((1u64 << W) - 1), expected, "unary history mismatch val={val}");
+            assert_eq!(get_slice_u512_pm(&sim, &d).as_limbs()[0] & ((1u64 << W) - 1), val, "d changed");
+            assert_eq!(get_slice_u512_pm(&sim, &active), U512::ZERO, "active chain not clean val={val}");
+            assert_eq!(sim.global_phase() & 1, 0, "unexpected phase val={val}");
+        }
+        eprintln!("plus-minus active-chain unary generator circuit: width={W}, ccx={ccx}, peak={peak}");
+        println!("METRIC plusminus_active_chain_circuit_width={W}");
+        println!("METRIC plusminus_active_chain_circuit_ccx={ccx}");
+        println!("METRIC plusminus_active_chain_circuit_peak_q={peak}");
+        assert_eq!(ccx, 2 * W, "active-chain generator should cost 2W CCX");
     }
 
     #[test]
