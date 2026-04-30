@@ -641,6 +641,37 @@ mod tests {
         assert!(event_frac > 0.20);
     }
 
+    fn orientation_stats(samples: usize, iters: usize) -> (f64, f64, f64) {
+        let p = SECP256K1_P;
+        let mut a_ones = 0usize;
+        let mut transitions = 0usize;
+        let mut total = 0usize;
+        for seed in 0..samples as u64 {
+            let v_in = random_element(seed + 1);
+            let (_m_hist, snaps) = kaliski_run(v_in, p, iters);
+            let mut prev = 0u8;
+            for i in 0..iters {
+                let (u, v_w, _r, _s, f) = snaps[i];
+                let a = a_control_from_snapshot(u, v_w, f);
+                a_ones += a as usize;
+                if i == 0 {
+                    transitions += a as usize;
+                } else {
+                    transitions += (a ^ prev) as usize;
+                }
+                prev = a;
+                total += 1;
+            }
+            transitions += prev as usize;
+        }
+        let a_frac = a_ones as f64 / total as f64;
+        let event_frac = transitions as f64 / total as f64;
+        let current_cswap_word_events = 2.0 * a_ones as f64;
+        let persistent_cswap_word_events = transitions as f64;
+        let ratio = persistent_cswap_word_events / current_cswap_word_events;
+        (a_frac, event_frac, ratio)
+    }
+
     #[test]
     fn transition_oriented_kaliski_matches_canonical_classically() {
         // Classical skeleton for a possible Kaliski persistent-orientation
@@ -714,6 +745,37 @@ mod tests {
         );
         println!("METRIC kaliski_transition_orientation_swap_ratio={ratio:.6}");
         assert!(ratio < 0.35);
+    }
+
+    #[test]
+    fn transition_orientation_selector_floor_kills_swap_saving() {
+        // Charge the missing selector from the transition-oriented upper bound.
+        // In a swapped physical frame the circuit must coherently know:
+        //   * whether logical v is zero (step 0), and
+        //   * whether logical u > logical v (step 2).
+        // A lower-bound implementation needs one extra selected-zero/OR chain
+        // and one equality/neq chain to turn A>B into B>A exactly on the active
+        // support.  This ignores low-bit muxing and all orientation bookkeeping,
+        // so if this floor already exceeds the saved cswaps the idea is not a
+        // local win in the current Kaliski body.
+        const N: f64 = 256.0;
+        let samples = 2048usize;
+        let (a404, ev404, _r404) = orientation_stats(samples, 404);
+        let (a401, ev401, _r401) = orientation_stats(samples, 401);
+        let cswap_saving_404 = 4.0 * N * a404 - 2.0 * N * ev404;
+        let cswap_saving_401 = 4.0 * N * a401 - 2.0 * N * ev401;
+        let selector_floor = 2.0 * (N - 1.0);
+        let net_loss_404 = selector_floor - cswap_saving_404;
+        let net_loss_401 = selector_floor - cswap_saving_401;
+        let projected_pointadd_loss = 2.0 * 404.0 * net_loss_404 + 2.0 * 401.0 * net_loss_401;
+        eprintln!(
+            "Transition-oriented Kaliski selector floor: save404={cswap_saving_404:.1}, save401={cswap_saving_401:.1}, selector_floor={selector_floor:.1}, projected_pointadd_loss={projected_pointadd_loss:.0}"
+        );
+        println!("METRIC kaliski_transition_cswap_saving_ccx_per_iter_404={cswap_saving_404:.3}");
+        println!("METRIC kaliski_transition_cswap_saving_ccx_per_iter_401={cswap_saving_401:.3}");
+        println!("METRIC kaliski_transition_selector_floor_ccx_per_iter={selector_floor:.3}");
+        println!("METRIC kaliski_transition_projected_pointadd_loss_ccx={projected_pointadd_loss:.0}");
+        assert!(projected_pointadd_loss > 100_000.0);
     }
 
     #[test]
