@@ -1676,6 +1676,65 @@ mod tests {
         })
     }
 
+    fn curve_xy_support_inverse_phase_has_degree_at_most(
+        n: usize,
+        p: u16,
+        qx: u16,
+        phase_mask: u16,
+        degree: usize,
+    ) -> bool {
+        let vars = 2 * n;
+        let masks = monomial_masks_for_curve_phase_test(vars, degree);
+        let cols = masks.len();
+        let chunks = (cols + 1 + 63) / 64;
+        let mut roots = vec![Vec::<u16>::new(); p as usize];
+        for y in 0..p {
+            roots[((y as u32 * y as u32) % p as u32) as usize].push(y);
+        }
+        let mut rows = Vec::new();
+        for x in 0..p {
+            if x == qx {
+                continue;
+            }
+            let x2 = mul_mod_u16_for_phase_test(x, x, p);
+            let rhs = add_mod_u16_for_phase_test(mul_mod_u16_for_phase_test(x2, x, p), 7, p);
+            let denom = sub_mod_u16_for_phase_test(x, qx, p);
+            let inv = inv_mod_u16_for_phase_test(denom, p);
+            for &y in &roots[rhs as usize] {
+                let idx = (x as u32) | ((y as u32) << n);
+                let mut row = vec![0u64; chunks];
+                for (col, &m) in masks.iter().enumerate() {
+                    if (idx & m) == m {
+                        row[col / 64] |= 1u64 << (col % 64);
+                    }
+                }
+                if ((inv & phase_mask).count_ones() & 1) != 0 {
+                    row[cols / 64] |= 1u64 << (cols % 64);
+                }
+                rows.push(row);
+            }
+        }
+        let mut rows_a = rows.clone();
+        for row in &mut rows_a {
+            row[cols / 64] &= !(1u64 << (cols % 64));
+        }
+        let rank_a = gf2_rank_bitrows_for_curve_phase_test(&mut rows_a, cols);
+        let rank_aug = gf2_rank_bitrows_for_curve_phase_test(&mut rows, cols + 1);
+        rank_a == rank_aug
+    }
+
+    fn curve_xy_support_inverse_phase_min_degree(
+        n: usize,
+        p: u16,
+        qx: u16,
+        phase_mask: u16,
+        max_degree: usize,
+    ) -> Option<usize> {
+        (0..=max_degree).find(|&d| {
+            curve_xy_support_inverse_phase_has_degree_at_most(n, p, qx, phase_mask, d)
+        })
+    }
+
     fn curve_y_support_inverse_phase_has_degree_at_most(
         n: usize,
         p: u16,
@@ -1933,6 +1992,37 @@ mod tests {
             last = min_degree;
         }
         assert!(last >= 7);
+    }
+
+    #[test]
+    fn keeping_curve_y_live_only_moves_inverse_to_support_interpolation() {
+        // Stronger objection than the x-support test: in point addition the old
+        // y-coordinate is still live, so maybe the cleanup phase for 1/(x-Qx)
+        // is a low-degree function of the full curve point (x,y), not of x
+        // alone.  The support has only ~p rows in 2n variables, so interpolation
+        // is easier, but the minimum degree still follows the support-dimension
+        // threshold and grows with n; it is not a local selector/cleanup.
+        let cases = [
+            (8usize, 251u16, 0b1010_0101u16, 3usize),
+            (10usize, 1021u16, 0b10_1001_0101u16, 4usize),
+            (12usize, 4093u16, 0b1010_0101_0101u16, 4usize),
+            (14usize, 16381u16, 0b10_1010_0101_0101u16, 5usize),
+        ];
+        let mut last = 0usize;
+        for &(n, p, mask, max_degree) in &cases {
+            let (qx, qy) = first_curve_point_u16_for_phase_test(p);
+            let min_degree = curve_xy_support_inverse_phase_min_degree(n, p, qx, mask, max_degree)
+                .expect("curve-(x,y) inverse phase should interpolate within toy bound");
+            eprintln!(
+                "Curve-(x,y)-support inverse phase: n={n}, p={p}, q=({qx},{qy}), min_degree={min_degree}"
+            );
+            if n == 14 {
+                println!("METRIC curve_xy_support_inv_min_degree_n14={min_degree}");
+            }
+            assert!(min_degree >= last);
+            last = min_degree;
+        }
+        assert!(last >= 4);
     }
 
     #[test]
