@@ -3071,6 +3071,29 @@ mod tests {
     }
 
     #[test]
+    fn plusminus_active_chain_generator_makes_conservative_bound_fit() {
+        // The active prefix chain already equals the unary history bits, so the
+        // separate unary-output ANDs in the first generator model were double
+        // counting.  Recompute the conservative S<=512, steps<=256 budget with
+        // the active-chain generator.
+        let gen_ccx = trailing_zero_active_chain_cost_for_plusminus(256);
+        let (scale_dp, _chunks) = solinas_history_carry_scale_dp_for_plusminus(512);
+        let cmp_ccx = compare_cost_for_plusminus(256);
+        let cswap_ccx = cswap_lanes_cost_for_plusminus(&[256, 257]);
+        let cint_add_ccx = controlled_integer_add_cost_for_plusminus(257);
+        let cshift_ccx = controlled_left_shift_cost_for_plusminus(257);
+        let step_tax = gen_ccx + cmp_ccx + cswap_ccx;
+        let one_div = 2 * (256 * cint_add_ccx + 512 * cshift_ccx) + 256 * step_tax + scale_dp[512];
+        let projected = 642_716usize + 2 * one_div;
+        let gap = projected as isize - 2_700_000isize;
+        eprintln!("plus-minus active-chain conservative budget: gen={gen_ccx}, projected={projected}, gap={gap}");
+        println!("METRIC plusminus_active_chain_generator_ccx={gen_ccx}");
+        println!("METRIC plusminus_active_chain_conservative_projected={projected}");
+        println!("METRIC plusminus_active_chain_conservative_gap={gap}");
+        assert!(gap < 0, "active-chain generator still misses conservative plus-minus bound");
+    }
+
+    #[test]
     fn plusminus_conservative_bound_budget_model() {
         // If a later proof gives coarse bounds like total scale S<=2n and
         // steps<=n, does the plus-minus/Solinas model still fit?  This guards
@@ -3542,6 +3565,29 @@ mod tests {
             b.x(d[j]);
             b.ccx(active[j], d[j], active[j + 1]);
             b.ccx(active[j], d[j], unary[j]);
+            b.x(d[j]);
+        }
+        local_count_ccx_for_plusminus_cost(&b.ops[start..])
+    }
+
+    fn trailing_zero_active_chain_cost_for_plusminus(width: usize) -> usize {
+        // Improved observation: active[j+1] itself is the unary-one bit for
+        // position j.  If the active chain is the history payload, no separate
+        // unary[j] AND is needed; copy/use active[1..] by CNOT/controls, then
+        // reverse the chain.  This halves the prefix Toffoli floor.
+        let mut b = super::super::B::new();
+        let d = b.alloc_qubits(width);
+        let active = b.alloc_qubits(width + 1);
+        b.x(active[0]);
+        let start = b.ops.len();
+        for j in 0..width {
+            b.x(d[j]);
+            b.ccx(active[j], d[j], active[j + 1]);
+            b.x(d[j]);
+        }
+        for j in (0..width).rev() {
+            b.x(d[j]);
+            b.ccx(active[j], d[j], active[j + 1]);
             b.x(d[j]);
         }
         local_count_ccx_for_plusminus_cost(&b.ops[start..])
