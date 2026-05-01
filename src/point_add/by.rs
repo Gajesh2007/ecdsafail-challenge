@@ -4993,6 +4993,98 @@ mod tests {
     }
 
     #[test]
+    fn partial_prefix_qoffset_validates_across_widths_and_finds_scratch_limit() {
+        // Broaden the previous single n=8/prefix=3 smoke test before treating
+        // the partial-prefix qoffset adder as a real low-scratch BY substrate.
+        // This is still local primitive validation, not a point-add hook-up.
+        for &n in &[8usize, 10, 12, 16] {
+            let prefix_cases = [0usize, 1, n / 4, n / 2, n];
+            let maskv = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+            for &prefix_len in &prefix_cases {
+                let mut b = super::super::B::new();
+                let ctrl = b.alloc_qubit();
+                let target = b.alloc_qubits(n);
+                let offset = b.alloc_qubits(n);
+                let dirty = b.alloc_qubits(n - 2);
+                let clean2 = [b.alloc_qubit(), b.alloc_qubit()];
+                let stream = b.alloc_qubit();
+                let prefix = b.alloc_qubits(prefix_len);
+                super::super::venting::ciadd_dirty_3clean_qoffset_partial_mask(
+                    &mut b, &target, &dirty, &clean2, stream, &prefix, &offset, ctrl,
+                );
+                let num_qubits = b.next_qubit as usize;
+                let num_bits = b.next_bit as usize;
+                let ops = b.ops;
+                for ctrl_v in [false, true] {
+                    for target_v in [0u64, 0x35, maskv.wrapping_sub(3) & maskv] {
+                        for offset_v in [0u64, 0x17, (1u64 << (n - 1)) & maskv] {
+                            let dirty_v = 0x5a5au64 & ((1u64 << (n - 2)) - 1);
+                            let mut hasher = sha3::Shake128::default();
+                            hasher.update(b"by-partial-prefix-qoffset-wide-v1");
+                            hasher.update(&(n as u64).to_le_bytes());
+                            hasher.update(&(prefix_len as u64).to_le_bytes());
+                            let mut xof = hasher.finalize_xof();
+                            let mut sim = crate::sim::Simulator::new(num_qubits, num_bits, &mut xof);
+                            if ctrl_v { *sim.qubit_mut(ctrl) |= 1; }
+                            set_slice_u512_by(&mut sim, &target, U512::from(target_v));
+                            set_slice_u512_by(&mut sim, &offset, U512::from(offset_v));
+                            set_slice_u512_by(&mut sim, &dirty, U512::from(dirty_v));
+                            sim.apply(&ops);
+                            let expected = if ctrl_v { target_v.wrapping_add(offset_v) & maskv } else { target_v & maskv };
+                            assert_eq!(get_slice_u512_by(&sim, &target).to::<u64>() & maskv, expected, "target mismatch n={n} prefix={prefix_len}");
+                            assert_eq!(get_slice_u512_by(&sim, &offset).to::<u64>() & maskv, offset_v & maskv, "offset changed n={n} prefix={prefix_len}");
+                            assert_eq!(get_slice_u512_by(&sim, &dirty).to::<u64>() & ((1u64 << (n - 2)) - 1), dirty_v, "dirty changed n={n} prefix={prefix_len}");
+                            assert_eq!(get_slice_u512_by(&sim, &prefix), U512::ZERO, "prefix masks dirty n={n} prefix={prefix_len}");
+                            assert_eq!(sim.qubit(stream) & 1, 0, "stream mask dirty n={n} prefix={prefix_len}");
+                            assert_eq!(sim.global_phase() & 1, 0, "phase changed n={n} prefix={prefix_len}");
+                        }
+                    }
+                }
+            }
+        }
+
+        let harness_cutoff_steps = 564usize;
+        let harness_windows = harness_cutoff_steps.div_ceil(16);
+        let scaffold_after_div = 642_716usize;
+        let lowword_selector = 5_952usize * harness_windows;
+        let decoder = 1_776usize * harness_windows;
+        let scratch_base = 510usize;
+        let mut best_prefix = 0usize;
+        let mut best_cost = usize::MAX;
+        let mut best_gap = isize::MAX;
+        for prefix_len in (0usize..=90).step_by(10) {
+            let mut b = super::super::B::new();
+            let ctrl = b.alloc_qubit();
+            let target = b.alloc_qubits(256);
+            let offset = b.alloc_qubits(256);
+            let dirty = b.alloc_qubits(254);
+            let clean2 = [b.alloc_qubit(), b.alloc_qubit()];
+            let stream = b.alloc_qubit();
+            let prefix = b.alloc_qubits(prefix_len);
+            super::super::venting::ciadd_dirty_3clean_qoffset_partial_mask(
+                &mut b, &target, &dirty, &clean2, stream, &prefix, &offset, ctrl,
+            );
+            let cost = count_ccx(&b.ops);
+            let step = cost + 256 + 255 + 255;
+            let gap = (scaffold_after_div + lowword_selector + decoder + step * harness_cutoff_steps) as isize - 2_700_000;
+            if scratch_base + prefix_len <= 600 && gap < best_gap {
+                best_prefix = prefix_len;
+                best_cost = cost;
+                best_gap = gap;
+            }
+        }
+        let scratch_best = scratch_base + best_prefix;
+        println!("METRIC by_partial_prefix_qoffset_best_prefix_under600={best_prefix}");
+        println!("METRIC by_partial_prefix_qoffset_best_cost_under600_ccx={best_cost}");
+        println!("METRIC by_partial_prefix_qoffset_best_scratch_under600={scratch_best}");
+        println!("METRIC by_partial_prefix_qoffset_best_gap_under600_ccx={best_gap}");
+        eprintln!(
+            "BY partial-prefix qoffset wide validation passed; best_under600 prefix={best_prefix}, cost={best_cost}, scratch={scratch_best}, gap={best_gap}"
+        );
+        assert!(best_gap < -100_000, "best under-600 prefix no longer has robust margin");
+    }
+
+    #[test]
     fn partial_mask_controlled_qoffset_linear_tradeoff_just_misses_600q_target() {
         // First-order model after the masked-borrow primitive: full mask gives
         // good gates but 766q scratch with compressed history; no mask gives
