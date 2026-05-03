@@ -1851,6 +1851,15 @@ max final-negative count `8`.  So the remaining final-correction/replay gap
 cannot be closed by simply measuring the correction flags and paying a cheap
 generic phase cleanup.
 
+A more structural final-correction variant was also checked:
+`direct_centered_centered_remainder_final_fix_is_phase_clean_but_not_free`
+converts the raw adjusted non-restoring remainder directly into the centered
+original-numerator remainder by adding/subtracting `d/2` and charging the
+odd-divisor increment.  The toy extractor is phase-clean, but the cost is still
+`2w-1` (`fix257=513`) and the tapered final-fix total remains `53,454`; the p99
+point-add gap stays `+134,592`.  So the centered remainder form is semantically
+nice but not a gate saving with current primitives.
+
 ## 6. Post-BY ground-up attempt: Strategy E slope-coordinate map
 
 New non-BY candidate: make the slope the live y-coordinate and avoid an

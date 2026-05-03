@@ -8873,6 +8873,90 @@ mod tests {
         b.free_vec(&shifted_v);
     }
 
+    fn emit_centered_final_half_fix_for_centered_test(
+        b: &mut super::super::B,
+        rem: &[super::super::QubitId],
+        half_divisor: &[super::super::QubitId],
+        divisor_odd: super::super::QubitId,
+        final_negative: super::super::QubitId,
+    ) {
+        // Convert the raw non-restoring adjusted remainder into the centered
+        // remainder for the original numerator.  If the raw remainder is
+        // nonnegative, subtract floor(d/2); if it is negative, add ceil(d/2).
+        // The ceil-vs-floor difference is the odd-divisor increment.
+        emit_fused_sign_controlled_addsub_digit_for_centered_test(
+            b,
+            rem,
+            half_divisor,
+            final_negative,
+        );
+        let odd_inc = b.alloc_qubit();
+        b.ccx(final_negative, divisor_odd, odd_inc);
+        super::super::cadd_nbit_const_direct_fast(b, rem, U256::from(1u64), odd_inc);
+        b.uncompute_and(final_negative, divisor_odd, odd_inc);
+        b.free(odd_inc);
+    }
+
+    fn emit_toy_direct_centered_nonrestoring_centered_remainder_for_centered_test(
+        b: &mut super::super::B,
+        rem: &[super::super::QubitId],
+        divisor: &[super::super::QubitId],
+        digit_hist: &[super::super::QubitId],
+        final_negative: super::super::QubitId,
+    ) {
+        assert_eq!(digit_hist.len(), 6);
+        assert_eq!(rem.len(), 11);
+        assert_eq!(divisor.len(), 4);
+        let shifted_v = b.alloc_qubits(rem.len());
+        for i in 0..divisor.len() {
+            b.cx(divisor[i], shifted_v[i + 5]);
+        }
+        for sh in (0..digit_hist.len()).rev() {
+            b.cx(rem[rem.len() - 1], digit_hist[sh]);
+            emit_fused_sign_controlled_addsub_digit_for_centered_test(b, rem, &shifted_v, digit_hist[sh]);
+            if sh != 0 {
+                emit_shift_right_1_nooverflow_for_centered_test(b, &shifted_v);
+            }
+        }
+        b.cx(rem[rem.len() - 1], final_negative);
+        let half_v = b.alloc_qubits(rem.len());
+        for i in 1..divisor.len() {
+            b.cx(divisor[i], half_v[i - 1]);
+        }
+        emit_centered_final_half_fix_for_centered_test(
+            b,
+            rem,
+            &half_v,
+            divisor[0],
+            final_negative,
+        );
+        for i in (1..divisor.len()).rev() {
+            b.cx(divisor[i], half_v[i - 1]);
+        }
+        b.free_vec(&half_v);
+        for i in (0..divisor.len()).rev() {
+            b.cx(divisor[i], shifted_v[i]);
+        }
+        b.free_vec(&shifted_v);
+    }
+
+    fn centered_final_half_fix_cost_for_centered_test(width: usize) -> usize {
+        let mut b = super::super::B::new();
+        let rem = b.alloc_qubits(width);
+        let half_divisor = b.alloc_qubits(width);
+        let divisor_odd = b.alloc_qubit();
+        let final_negative = b.alloc_qubit();
+        let start = b.ops.len();
+        emit_centered_final_half_fix_for_centered_test(
+            &mut b,
+            &rem,
+            &half_divisor,
+            divisor_odd,
+            final_negative,
+        );
+        local_count_ccx_for_plusminus_cost(&b.ops[start..])
+    }
+
     #[test]
     fn direct_centered_nonrestoring_current_signed_digit_primitive_kills_margin() {
         // The reopened direct-rounding ledger assumes each signed quotient
@@ -9070,6 +9154,124 @@ mod tests {
         eprintln!("Centered direct-rounding toy packed extractor: ccx={ccx}, peak={peak}, current_finalfix_gap={gap}");
         assert_eq!(ccx, DIGITS * (REM_W - 1) + (2 * REM_W - 1), "toy extractor primitive cost drifted");
         assert!(gap < 0, "current final-fix primitive erases relaxed direct-centered margin");
+    }
+
+    #[test]
+    fn direct_centered_centered_remainder_final_fix_is_phase_clean_but_not_free() {
+        // Alternative final cleanup for the direct-centered non-restoring
+        // extractor: instead of conditionally adding the full divisor to make
+        // the adjusted remainder nonnegative, convert directly to the centered
+        // original-numerator remainder with a sign-selected half-divisor
+        // correction.  This is semantically nicer for the centered Euclid
+        // recurrence; charge the odd-divisor increment explicitly.
+        use sha3::digest::{ExtendableOutput, Update};
+
+        const REM_W: usize = 11;
+        const DIV_W: usize = 4;
+        const DIGITS: usize = 6;
+        let mut b = super::super::B::new();
+        let rem = b.alloc_qubits(REM_W);
+        let divisor = b.alloc_qubits(DIV_W);
+        let digit_hist = b.alloc_qubits(DIGITS);
+        let final_negative = b.alloc_qubit();
+        let start = b.ops.len();
+        emit_toy_direct_centered_nonrestoring_centered_remainder_for_centered_test(
+            &mut b,
+            &rem,
+            &divisor,
+            &digit_hist,
+            final_negative,
+        );
+        let ccx = local_count_ccx_for_plusminus_cost(&b.ops[start..]);
+        let peak = b.peak_qubits;
+        let num_qubits = b.next_qubit as usize;
+        let num_bits = b.next_bit as usize;
+        let ops = b.ops;
+        let rem_mask = (1u64 << REM_W) - 1;
+        for d in 1u64..(1u64 << DIV_W) {
+            for n in 0u64..49u64 {
+                let adjusted = n + (d >> 1);
+                let mut hasher = sha3::Shake128::default();
+                hasher.update(b"direct-centered-toy-centered-final-fix-v1");
+                let mut xof = hasher.finalize_xof();
+                let mut sim = crate::sim::Simulator::new(num_qubits, num_bits, &mut xof);
+                set_slice_u512_pm(&mut sim, &rem, U512::from(adjusted));
+                set_slice_u512_pm(&mut sim, &divisor, U512::from(d));
+                sim.apply(&ops);
+
+                let rem_raw = get_slice_u512_pm(&sim, &rem).as_limbs()[0] & rem_mask;
+                let rem_signed = if (rem_raw & (1u64 << (REM_W - 1))) != 0 {
+                    rem_raw as i64 - (1i64 << REM_W)
+                } else {
+                    rem_raw as i64
+                };
+                let div_out = get_slice_u512_pm(&sim, &divisor).as_limbs()[0] & ((1u64 << DIV_W) - 1);
+                let hist = get_slice_u512_pm(&sim, &digit_hist).as_limbs()[0];
+                let mut q = 0i64;
+                for sh in 0..DIGITS {
+                    if ((hist >> sh) & 1) == 0 {
+                        q += 1i64 << sh;
+                    } else {
+                        q -= 1i64 << sh;
+                    }
+                }
+                if (sim.qubit(final_negative) & 1) != 0 {
+                    q -= 1;
+                }
+                let expected_q = (adjusted / d) as i64;
+                let expected_rem = n as i64 - expected_q * d as i64;
+                assert_eq!(q, expected_q, "quotient mismatch n={n} d={d}");
+                assert_eq!(rem_signed, expected_rem, "centered remainder mismatch n={n} d={d}");
+                assert_eq!(div_out, d, "divisor changed n={n} d={d}");
+                assert_eq!(sim.global_phase() & 1, 0, "unexpected phase n={n} d={d}");
+            }
+        }
+
+        let fix33 = centered_final_half_fix_cost_for_centered_test(33);
+        let fix65 = centered_final_half_fix_cost_for_centered_test(65);
+        let fix257 = centered_final_half_fix_cost_for_centered_test(257);
+        let n = 256usize;
+        let count_p99 = 118usize;
+        let digit_payload_p99 = 397usize;
+        let digit_width_cost_p99 = 90_281usize;
+        let final_p99 = 69usize;
+        let public_width_sum = (0..count_p99)
+            .map(|step| direct_centered_public_width_bound_for_step(n, step))
+            .sum::<usize>();
+        let replay_per_div = (digit_payload_p99 + final_p99) * 587usize;
+        let current_final_fix_tapered = (0..count_p99)
+            .map(|step| 2usize * direct_centered_public_width_bound_for_step(n, step) - 1usize)
+            .sum::<usize>();
+        let centered_final_fix_tapered = (0..count_p99)
+            .map(|step| centered_final_half_fix_cost_for_centered_test(direct_centered_public_width_bound_for_step(n, step)))
+            .sum::<usize>();
+        let inactive_positions_tapered = public_width_sum - digit_payload_p99;
+        let barrel_and_scan_tapered = public_width_sum * (8usize + 1usize);
+        let extraction_oneway = digit_width_cost_p99
+            + barrel_and_scan_tapered
+            + centered_final_fix_tapered
+            + inactive_positions_tapered;
+        let pointadd = 642_716isize + 2 * (replay_per_div + 2 * extraction_oneway) as isize;
+        let gap_to_2700k = pointadd - 2_700_000isize;
+        println!("METRIC centered_direct_centered_final_fix_toy_ccx={ccx}");
+        println!("METRIC centered_direct_centered_final_fix_toy_peak={peak}");
+        println!("METRIC centered_direct_centered_final_fix_ccx33={fix33}");
+        println!("METRIC centered_direct_centered_final_fix_ccx65={fix65}");
+        println!("METRIC centered_direct_centered_final_fix_ccx257={fix257}");
+        println!("METRIC centered_direct_centered_final_fix_current_tapered={current_final_fix_tapered}");
+        println!("METRIC centered_direct_centered_final_fix_tapered={centered_final_fix_tapered}");
+        println!("METRIC centered_direct_centered_final_fix_pointadd={pointadd}");
+        println!("METRIC centered_direct_centered_final_fix_gap_to_2700k={gap_to_2700k}");
+        eprintln!(
+            "Centered direct centered-remainder final fix: toy_ccx={ccx}, peak={peak}, fix33={fix33}, fix65={fix65}, fix257={fix257}, current_tapered={current_final_fix_tapered}, centered_tapered={centered_final_fix_tapered}, pointadd={pointadd}, gap2700k={gap_to_2700k}"
+        );
+        assert_eq!(fix33, 2 * 33 - 1, "centered final fix cost model drifted at 33 bits");
+        assert_eq!(fix65, 2 * 65 - 1, "centered final fix cost model drifted at 65 bits");
+        assert_eq!(
+            centered_final_fix_tapered, current_final_fix_tapered,
+            "centered half fix unexpectedly changed the final-fix Toffoli budget"
+        );
+        assert!(gap_to_2700k > 0, "centered half fix unexpectedly closes the exact p99 low-qubit gap");
     }
 
     #[test]
