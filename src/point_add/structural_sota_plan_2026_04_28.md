@@ -1780,6 +1780,29 @@ route therefore needs either a phase-clean wide-quotient fallback or a way to
 make the high alignment layers classically/rarely executed; a bare 5-bit exact
 barrel is not correct for the whole field.
 
+Follow-up: the exact full-barrel ledger was still overcharging static width.
+`direct_centered_public_width_taper_closes_exact_inactive_tax_gap` uses the
+public centered-remainder invariant that active width drops by at least one bit
+every two iterations.  It verifies the bound exhaustively on toy primes and on
+32,768 secp samples, then charges tapered digit width, scan/barrel width,
+inactive positions, and final-fix width:
+
+```text
+p99 digit payload             = 397
+p99 public digit-width cost   = 90,281
+p99 count                     = 118
+public width sum              = 26,786  (vs 30,208 full-width)
+saved static width slots      = 3,422
+tapered extraction one-way    = 411,198 CCX
+tapered exact point-add       = 2,834,592 CCX
+gap to 3M                     = -165,408 CCX
+gap to 2.7M                   = +134,592 CCX
+```
+
+This revives an exact relaxed-3M direct-centered route without classical
+alignment metadata.  It is still not the low-qubit SOTA target: the remaining
+gap to 2.7M is about 33,648 one-way extraction CCX or 67,296 per-DIV replay CCX.
+
 Follow-up: the barrel mechanics are not the blocker if the parser can expose
 alignment metadata as phase-clean classical bits.  `direct_centered_classical_alignment_metadata_would_remove_barrel_blocker`
 uses bit-controlled swaps and measures `0` barrel Toffoli in the toy shifter.

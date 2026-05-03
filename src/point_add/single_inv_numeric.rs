@@ -8627,6 +8627,10 @@ mod tests {
         (digits, rem.mag, final_negative)
     }
 
+    fn direct_centered_public_width_bound_for_step(n: usize, step: usize) -> usize {
+        n.saturating_sub(step / 2).max(1)
+    }
+
     #[test]
     fn centered_nonrestoring_full_corrections_kill_relaxed_margin() {
         // Guardrail after the optimistic signed-digit ledger: full non-restoring
@@ -9240,6 +9244,130 @@ mod tests {
         assert!(exact_required_bits > sampled_bounded_bits, "full-domain alignment no longer needs high barrel layers");
         assert!(bounded_one_ccx_gap < 0, "sampled bounded ledger no longer has inactive-tax margin");
         assert!(exact_one_ccx_gap > 0, "full-domain high barrel layers still fit with inactive tax; bounded fallback is less critical");
+    }
+
+    #[test]
+    fn direct_centered_public_width_taper_closes_exact_inactive_tax_gap() {
+        // The exact full-domain fallback above charged every quotient record at
+        // full 256-bit width.  Centered remainders have a public shrinkage
+        // invariant: after every two iterations the active numerator/denominator
+        // width drops by at least one bit.  That static schedule needs no
+        // measured metadata and is enough to close the small exact-barrel
+        // inactive-tax miss against the relaxed 3M target.
+        for &(n, p16) in &[(8usize, 251u16), (10, 1021), (12, 4093), (14, 16381)] {
+            for x in 1..p16 {
+                let mut u = smag_for_halfgcd_test(false, U512::from(p16 as u64));
+                let mut v = smag_for_halfgcd_test(false, U512::from(x as u64));
+                let mut step = 0usize;
+                while !v.mag.is_zero() {
+                    let width = u512_bit_len_for_halfgcd_test(u.mag)
+                        .max(u512_bit_len_for_halfgcd_test(v.mag));
+                    let public_bound = direct_centered_public_width_bound_for_step(n, step);
+                    assert!(
+                        width <= public_bound,
+                        "toy centered width bound failed n={n} x={x} step={step} width={width} bound={public_bound}"
+                    );
+                    let adjusted = u.mag + (v.mag >> 1usize);
+                    let q_direct = adjusted / v.mag;
+                    let q_neg = u.neg ^ v.neg;
+                    let qv = signed_mul_mag_for_halfgcd_test(v, q_neg, q_direct);
+                    let r = signed_add_for_halfgcd_test(u, signed_neg_for_halfgcd_test(qv));
+                    u = v;
+                    v = r;
+                    step += 1;
+                }
+            }
+        }
+
+        let p = SECP256K1_P;
+        let samples = 32_768usize;
+        let mut rng = 0x2800_d1ce_7a9e_0001u64;
+        let mut digit_payloads = Vec::with_capacity(samples);
+        let mut digit_width_costs = Vec::with_capacity(samples);
+        let mut counts = Vec::with_capacity(samples);
+        let mut final_negs = Vec::with_capacity(samples);
+        let n = 256usize;
+        for _ in 0..samples {
+            let mut x = rand_u256(&mut rng);
+            if x.is_zero() { x = U256::from(1u64); }
+            let mut u = smag_for_halfgcd_test(false, u512_from_u256_for_halfgcd_test(p));
+            let mut v = smag_for_halfgcd_test(false, u512_from_u256_for_halfgcd_test(x));
+            let (mut digit_payload, mut digit_width_cost, mut count, mut final_count) =
+                (0usize, 0usize, 0usize, 0usize);
+            while !v.mag.is_zero() {
+                let width = u512_bit_len_for_halfgcd_test(u.mag)
+                    .max(u512_bit_len_for_halfgcd_test(v.mag));
+                let public_bound = direct_centered_public_width_bound_for_step(n, count);
+                assert!(
+                    width <= public_bound,
+                    "secp centered width bound failed count={count} width={width} bound={public_bound}"
+                );
+                let adjusted = u.mag + (v.mag >> 1usize);
+                let q_direct = adjusted / v.mag;
+                let (digits, _rem, final_negative) =
+                    nonrestoring_floor_digits_for_centered_test(adjusted, v.mag);
+                digit_payload += digits;
+                digit_width_cost += digits * public_bound;
+                final_count += final_negative as usize;
+                count += 1;
+                let q_neg = u.neg ^ v.neg;
+                let qv = signed_mul_mag_for_halfgcd_test(v, q_neg, q_direct);
+                let r = signed_add_for_halfgcd_test(u, signed_neg_for_halfgcd_test(qv));
+                u = v;
+                v = r;
+            }
+            digit_payloads.push(digit_payload);
+            digit_width_costs.push(digit_width_cost);
+            counts.push(count);
+            final_negs.push(final_count);
+        }
+        digit_payloads.sort_unstable();
+        digit_width_costs.sort_unstable();
+        counts.sort_unstable();
+        final_negs.sort_unstable();
+        let p99 = samples * 99 / 100;
+        let digit_payload_p99 = digit_payloads[p99];
+        let digit_width_cost_p99 = digit_width_costs[p99];
+        let count_p99 = counts[p99];
+        let final_p99 = final_negs[p99];
+        let full_width_sum = count_p99 * n;
+        let public_width_sum = (0..count_p99)
+            .map(|step| direct_centered_public_width_bound_for_step(n, step))
+            .sum::<usize>();
+        let saved_static_width_slots = full_width_sum - public_width_sum;
+        let replay_per_div = (digit_payload_p99 + final_p99) * 587usize;
+        let final_fix_tapered = (0..count_p99)
+            .map(|step| 2usize * direct_centered_public_width_bound_for_step(n, step) - 1usize)
+            .sum::<usize>();
+        let inactive_positions_tapered = public_width_sum - digit_payload_p99;
+        let barrel_and_scan_tapered = public_width_sum * (8usize + 1usize);
+        let extraction_oneway = digit_width_cost_p99
+            + barrel_and_scan_tapered
+            + final_fix_tapered
+            + inactive_positions_tapered;
+        let pointadd = 642_716isize + 2 * (replay_per_div + 2 * extraction_oneway) as isize;
+        let gap_to_3m = pointadd - 3_000_000isize;
+        let gap_to_2700k = pointadd - 2_700_000isize;
+        println!("METRIC centered_direct_width_taper_samples={samples}");
+        println!("METRIC centered_direct_width_taper_digit_payload_p99={digit_payload_p99}");
+        println!("METRIC centered_direct_width_taper_digit_width_cost_p99={digit_width_cost_p99}");
+        println!("METRIC centered_direct_width_taper_count_p99={count_p99}");
+        println!("METRIC centered_direct_width_taper_final_negative_p99={final_p99}");
+        println!("METRIC centered_direct_width_taper_full_width_sum={full_width_sum}");
+        println!("METRIC centered_direct_width_taper_public_width_sum={public_width_sum}");
+        println!("METRIC centered_direct_width_taper_saved_static_slots={saved_static_width_slots}");
+        println!("METRIC centered_direct_width_taper_final_fix_ccx={final_fix_tapered}");
+        println!("METRIC centered_direct_width_taper_inactive_positions={inactive_positions_tapered}");
+        println!("METRIC centered_direct_width_taper_extraction_oneway={extraction_oneway}");
+        println!("METRIC centered_direct_width_taper_pointadd={pointadd}");
+        println!("METRIC centered_direct_width_taper_gap_to_3m={gap_to_3m}");
+        println!("METRIC centered_direct_width_taper_gap_to_2700k={gap_to_2700k}");
+        eprintln!(
+            "Centered direct public width taper: payload_p99={digit_payload_p99}, digit_width_p99={digit_width_cost_p99}, count_p99={count_p99}, final_p99={final_p99}, public_width_sum={public_width_sum}, saved_slots={saved_static_width_slots}, extraction={extraction_oneway}, pointadd={pointadd}, gap3m={gap_to_3m}, gap2700k={gap_to_2700k}"
+        );
+        assert!(saved_static_width_slots > 3000, "public width taper no longer saves enough static positions");
+        assert!(gap_to_3m < 0, "public width taper does not close the relaxed exact-barrel inactive-tax gap");
+        assert!(gap_to_2700k > 0, "public width taper alone reaches the low-qubit target; promote to implementation");
     }
 
     #[test]
