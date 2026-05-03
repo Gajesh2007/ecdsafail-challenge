@@ -1697,12 +1697,31 @@ scaled 257-bit digit           = 2,041 CCX
 projected relaxed point-add gap = +2,639,228 CCX
 ```
 
-So the direct-centered recurrence is only a mathematical opening, not an
-implementation path with today's adders.  Promotion now requires a new fused
-sign-controlled add/sub digit primitive near the original `~n` ledger cost,
-then a toy reversible packed extractor including shifted-divisor alignment,
-final-negative cleanup, denominator reverse, parser/boundary cleanup, and phase
-cleanliness.
+That generic implementation is not a viable path.  The follow-up
+`direct_centered_nonrestoring_fused_signed_digit_revives_margin` folds the
+choice into one two's-complement add:
+
+```text
+sign=0: rem += ~shifted_v + 1 = rem - shifted_v
+sign=1: rem +=  shifted_v
+```
+
+by toggling `shifted_v` under `!sign` and using `!sign` as the fast-Cuccaro
+carry-in.  The small-basis simulator check confirms data, addend cleanup, and
+phase cleanliness.  Measured cost:
+
+```text
+33-bit digit                  = 32 CCX
+65-bit digit                  = 64 CCX
+257-bit digit                 = 256 CCX
+257-bit digit peak            = 772 qubits
+projected relaxed point-add gap = -195,352 CCX
+```
+
+This revives the hard digit primitive, but it is still only a route candidate.
+The next promotion gate is a toy reversible packed extractor including
+shifted-divisor alignment, final-negative cleanup, denominator reverse,
+parser/boundary cleanup, and phase cleanliness.
 
 ## 6. Post-BY ground-up attempt: Strategy E slope-coordinate map
 

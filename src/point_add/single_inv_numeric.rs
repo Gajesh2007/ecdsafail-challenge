@@ -8763,6 +8763,28 @@ mod tests {
         b.free(nonnegative);
     }
 
+    fn emit_fused_sign_controlled_addsub_digit_for_centered_test(
+        b: &mut super::super::B,
+        rem: &[super::super::QubitId],
+        shifted_v: &[super::super::QubitId],
+        sign_hist: super::super::QubitId,
+    ) {
+        assert_eq!(rem.len(), shifted_v.len());
+        let nonnegative = b.alloc_qubit();
+        b.x(nonnegative);
+        b.cx(sign_hist, nonnegative);
+        for &q in shifted_v {
+            b.cx(nonnegative, q);
+        }
+        super::super::cuccaro_add_fast(b, shifted_v, rem, nonnegative);
+        for &q in shifted_v.iter().rev() {
+            b.cx(nonnegative, q);
+        }
+        b.cx(sign_hist, nonnegative);
+        b.x(nonnegative);
+        b.free(nonnegative);
+    }
+
     #[test]
     fn direct_centered_nonrestoring_current_signed_digit_primitive_kills_margin() {
         // The reopened direct-rounding ledger assumes each signed quotient
@@ -8800,6 +8822,87 @@ mod tests {
         println!("METRIC centered_direct_round_current_digit_gap_to_3m_ccx={gap}");
         eprintln!("Centered direct-rounding current digit primitive: ccx32={ccx32}, ccx64={ccx64}, per_bit64={per_bit64:.2}, scaled257={per_digit_257}, gap={gap}");
         assert!(gap > 0, "current sign-controlled add/sub still fits; build packed extractor next");
+    }
+
+    #[test]
+    fn direct_centered_nonrestoring_fused_signed_digit_revives_margin() {
+        // Fold add vs subtract into one fast Cuccaro add.  For sign_hist=0 the
+        // nonnegative control complements shifted_v and supplies carry-in=1,
+        // so rem += ~shifted_v + 1 = rem - shifted_v.  For sign_hist=1 it is
+        // the ordinary rem += shifted_v path.  The addend is restored after the
+        // measurement-based carry cleanup.
+        use sha3::digest::{ExtendableOutput, Update};
+
+        let cost_for = |width: usize| -> (usize, u32) {
+            let mut b = super::super::B::new();
+            let rem = b.alloc_qubits(width);
+            let shifted_v = b.alloc_qubits(width);
+            let sign_hist = b.alloc_qubit();
+            let start = b.ops.len();
+            emit_fused_sign_controlled_addsub_digit_for_centered_test(&mut b, &rem, &shifted_v, sign_hist);
+            (local_count_ccx_for_plusminus_cost(&b.ops[start..]), b.peak_qubits)
+        };
+        let (ccx33, peak33) = cost_for(33);
+        let (ccx65, peak65) = cost_for(65);
+        let (ccx257, peak257) = cost_for(257);
+
+        const W: usize = 8;
+        let mut b = super::super::B::new();
+        let rem = b.alloc_qubits(W);
+        let shifted_v = b.alloc_qubits(W);
+        let sign_hist = b.alloc_qubit();
+        emit_fused_sign_controlled_addsub_digit_for_centered_test(&mut b, &rem, &shifted_v, sign_hist);
+        let num_qubits = b.next_qubit as usize;
+        let num_bits = b.next_bit as usize;
+        let ops = b.ops;
+        let mask = (1u64 << W) - 1;
+        for &sign_val in &[false, true] {
+            for x in 0u64..64u64 {
+                for y in 0u64..64u64 {
+                    let mut hasher = sha3::Shake128::default();
+                    hasher.update(b"direct-centered-fused-addsub-v1");
+                    let mut xof = hasher.finalize_xof();
+                    let mut sim = crate::sim::Simulator::new(num_qubits, num_bits, &mut xof);
+                    set_slice_u512_pm(&mut sim, &rem, U512::from(x));
+                    set_slice_u512_pm(&mut sim, &shifted_v, U512::from(y));
+                    if sign_val {
+                        *sim.qubit_mut(sign_hist) |= 1;
+                    }
+                    sim.apply(&ops);
+                    let expected = if sign_val {
+                        x.wrapping_add(y) & mask
+                    } else {
+                        x.wrapping_sub(y) & mask
+                    };
+                    assert_eq!(get_slice_u512_pm(&sim, &rem).as_limbs()[0] & mask, expected, "rem mismatch sign={sign_val} x={x} y={y}");
+                    assert_eq!(get_slice_u512_pm(&sim, &shifted_v).as_limbs()[0] & mask, y, "shifted_v changed");
+                    assert_eq!((sim.qubit(sign_hist) & 1) != 0, sign_val, "sign changed");
+                    assert_eq!(sim.global_phase() & 1, 0, "unexpected phase sign={sign_val} x={x} y={y}");
+                }
+            }
+        }
+
+        let digit_payload_p99 = 397usize;
+        let count_p99 = 118usize;
+        let final_p99 = 69usize;
+        let replay_per_div = (digit_payload_p99 + final_p99) * 587usize;
+        let barrel_and_scan = count_p99 * (256usize * 8usize + 256usize);
+        let final_fix = count_p99 * 256usize;
+        let extraction_oneway = digit_payload_p99 * ccx257 + barrel_and_scan + final_fix;
+        let pointadd = 642_716isize + 2 * (replay_per_div + 2 * extraction_oneway) as isize;
+        let gap = pointadd - 3_000_000isize;
+        println!("METRIC centered_direct_round_fused_digit_ccx33={ccx33}");
+        println!("METRIC centered_direct_round_fused_digit_peak33={peak33}");
+        println!("METRIC centered_direct_round_fused_digit_ccx65={ccx65}");
+        println!("METRIC centered_direct_round_fused_digit_peak65={peak65}");
+        println!("METRIC centered_direct_round_fused_digit_ccx257={ccx257}");
+        println!("METRIC centered_direct_round_fused_digit_peak257={peak257}");
+        println!("METRIC centered_direct_round_fused_digit_gap_to_3m_ccx={gap}");
+        eprintln!("Centered direct-rounding fused digit primitive: ccx33={ccx33}, ccx65={ccx65}, ccx257={ccx257}, peak257={peak257}, gap={gap}");
+        assert_eq!(ccx33, 32, "fused digit no longer costs width-1 at 33 bits");
+        assert_eq!(ccx65, 64, "fused digit no longer costs width-1 at 65 bits");
+        assert_eq!(ccx257, 256, "fused digit no longer costs width-1 at 257 bits");
+        assert!(gap < 0, "fused sign-controlled digit does not revive relaxed direct-centered route");
     }
 
     #[test]
