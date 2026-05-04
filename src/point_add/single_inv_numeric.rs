@@ -3545,25 +3545,125 @@ mod tests {
         (degree, density, max_positions, max_pair)
     }
 
+    struct HalfGcdSecondColumnActivePredicateStats {
+        parity_degree: usize,
+        parity_density: usize,
+        max_positions: usize,
+        max_pair: usize,
+        active_slots: usize,
+        full_active_slots: usize,
+        pair_positions: usize,
+        min_individual_degree: usize,
+        min_individual_density: usize,
+        max_individual_density: usize,
+    }
+
+    fn half_gcd_second_column_active_pair_anf_stats(
+        n: usize,
+        trace_pairs: &[(usize, Vec<(bool, bool)>)],
+        phase_mask: usize,
+        b_active_support: &[bool],
+        d_active_support: &[bool],
+        pair_active_support: &[bool],
+        max_pair: usize,
+    ) -> HalfGcdSecondColumnActivePredicateStats {
+        let size = 1usize << n;
+        let pair_mask = 0b11usize;
+        let anf_stats_for = |mask: usize, selected_pos: Option<usize>| -> (usize, usize) {
+            let mut anf = vec![0u8; size];
+            for (x, pairs) in trace_pairs {
+                let mut parity = 0u8;
+                match selected_pos {
+                    Some(pos) => {
+                        if let Some(&(active0, active1)) = pairs.get(pos) {
+                            let pair = active0 as usize | ((active1 as usize) << 1);
+                            parity ^= ((pair & mask & pair_mask).count_ones() as u8) & 1;
+                        }
+                    }
+                    None => {
+                        for &(active0, active1) in pairs {
+                            let pair = active0 as usize | ((active1 as usize) << 1);
+                            parity ^= ((pair & mask & pair_mask).count_ones() as u8) & 1;
+                        }
+                    }
+                }
+                anf[*x] = parity;
+            }
+            for bit in 0..n {
+                for idx in 0..size {
+                    if (idx & (1usize << bit)) != 0 {
+                        anf[idx] ^= anf[idx ^ (1usize << bit)];
+                    }
+                }
+            }
+            let density = anf.iter().filter(|&&v| v != 0).count();
+            let degree = anf
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &v)| if v != 0 { Some(i.count_ones() as usize) } else { None })
+                .max()
+                .unwrap_or(0);
+            (degree, density)
+        };
+        let (parity_degree, parity_density) = anf_stats_for(phase_mask, None);
+        let mut min_individual_degree = usize::MAX;
+        let mut min_individual_density = usize::MAX;
+        let mut max_individual_density = 0usize;
+        for (pos, &seen) in b_active_support.iter().enumerate() {
+            if seen {
+                let (degree, density) = anf_stats_for(0b01, Some(pos));
+                min_individual_degree = min_individual_degree.min(degree);
+                min_individual_density = min_individual_density.min(density);
+                max_individual_density = max_individual_density.max(density);
+            }
+        }
+        for (pos, &seen) in d_active_support.iter().enumerate() {
+            if seen {
+                let (degree, density) = anf_stats_for(0b10, Some(pos));
+                min_individual_degree = min_individual_degree.min(degree);
+                min_individual_density = min_individual_density.min(density);
+                max_individual_density = max_individual_density.max(density);
+            }
+        }
+        let active_slots = b_active_support.iter().filter(|&&seen| seen).count()
+            + d_active_support.iter().filter(|&&seen| seen).count();
+        if active_slots == 0 {
+            min_individual_degree = 0;
+            min_individual_density = 0;
+        }
+        let full_active_slots = 2 * pair_active_support.len();
+        let pair_positions = pair_active_support.iter().filter(|&&seen| seen).count();
+        HalfGcdSecondColumnActivePredicateStats {
+            parity_degree,
+            parity_density,
+            max_positions: pair_active_support.len(),
+            max_pair,
+            active_slots,
+            full_active_slots,
+            pair_positions,
+            min_individual_degree,
+            min_individual_density,
+            max_individual_density,
+        }
+    }
+
     fn half_gcd_second_column_wnaf_active_predicate_stats(
         n: usize,
         p: u16,
         window: usize,
         phase_mask: usize,
-    ) -> (usize, usize, usize, usize, usize, usize, usize) {
-        let size = 1usize << n;
+    ) -> HalfGcdSecondColumnActivePredicateStats {
         let depth = (n / 4).max(1);
-        let pair_mask = 0b11usize;
         let to_signed_mag = |value: i128| -> SignedMagU512ForHalfGcdTest {
             smag_for_halfgcd_test(
                 value < 0,
                 U512::from(value.unsigned_abs() as u64),
             )
         };
-        let mut anf = vec![0u8; size];
         let mut b_active_support = Vec::<bool>::new();
         let mut d_active_support = Vec::<bool>::new();
         let mut pair_active_support = Vec::<bool>::new();
+        let mut trace_pairs = Vec::<(usize, Vec<(bool, bool)>)>::new();
         let mut max_pair = 0usize;
         for x in 1..p {
             let mut u = p as i128;
@@ -3595,7 +3695,7 @@ mod tests {
             }
             let mut idx0 = 0usize;
             let mut idx1 = 0usize;
-            let mut parity = 0u8;
+            let mut pairs = Vec::with_capacity(max_pos + 1);
             for pos in 0..=max_pos {
                 let mut active0 = false;
                 let mut active1 = false;
@@ -3618,36 +3718,18 @@ mod tests {
                 if pair != 0 {
                     pair_active_support[pos] = true;
                 }
-                parity ^= ((pair & phase_mask & pair_mask).count_ones() as u8) & 1;
+                pairs.push((active0, active1));
             }
-            anf[x as usize] = parity;
+            trace_pairs.push((x as usize, pairs));
         }
-        for bit in 0..n {
-            for idx in 0..size {
-                if (idx & (1usize << bit)) != 0 {
-                    anf[idx] ^= anf[idx ^ (1usize << bit)];
-                }
-            }
-        }
-        let density = anf.iter().filter(|&&v| v != 0).count();
-        let degree = anf
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &v)| if v != 0 { Some(i.count_ones() as usize) } else { None })
-            .max()
-            .unwrap_or(0);
-        let active_slots = b_active_support.iter().filter(|&&seen| seen).count()
-            + d_active_support.iter().filter(|&&seen| seen).count();
-        let full_active_slots = 2 * pair_active_support.len();
-        let pair_positions = pair_active_support.iter().filter(|&&seen| seen).count();
-        (
-            degree,
-            density,
-            pair_active_support.len(),
+        half_gcd_second_column_active_pair_anf_stats(
+            n,
+            &trace_pairs,
+            phase_mask,
+            &b_active_support,
+            &d_active_support,
+            &pair_active_support,
             max_pair,
-            active_slots,
-            full_active_slots,
-            pair_positions,
         )
     }
 
@@ -3746,14 +3828,12 @@ mod tests {
         n: usize,
         p: u16,
         phase_mask: usize,
-    ) -> (usize, usize, usize, usize, usize, usize, usize) {
-        let size = 1usize << n;
+    ) -> HalfGcdSecondColumnActivePredicateStats {
         let depth = (n / 4).max(1);
-        let pair_mask = 0b11usize;
-        let mut anf = vec![0u8; size];
         let mut b_active_support = Vec::<bool>::new();
         let mut d_active_support = Vec::<bool>::new();
         let mut pair_active_support = Vec::<bool>::new();
+        let mut trace_pairs = Vec::<(usize, Vec<(bool, bool)>)>::new();
         let mut max_pair = 0usize;
         for x in 1..p {
             let mut u = p as i128;
@@ -3779,7 +3859,6 @@ mod tests {
                 d_active_support.resize(new_len, false);
                 pair_active_support.resize(new_len, false);
             }
-            let mut parity = 0u8;
             for (pos, &(active0, active1)) in digits.iter().enumerate() {
                 let pair = active0 as usize | ((active1 as usize) << 1);
                 max_pair = max_pair.max(pair);
@@ -3792,36 +3871,17 @@ mod tests {
                 if pair != 0 {
                     pair_active_support[pos] = true;
                 }
-                parity ^= ((pair & phase_mask & pair_mask).count_ones() as u8) & 1;
             }
-            anf[x as usize] = parity;
+            trace_pairs.push((x as usize, digits));
         }
-        for bit in 0..n {
-            for idx in 0..size {
-                if (idx & (1usize << bit)) != 0 {
-                    anf[idx] ^= anf[idx ^ (1usize << bit)];
-                }
-            }
-        }
-        let density = anf.iter().filter(|&&v| v != 0).count();
-        let degree = anf
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &v)| if v != 0 { Some(i.count_ones() as usize) } else { None })
-            .max()
-            .unwrap_or(0);
-        let active_slots = b_active_support.iter().filter(|&&seen| seen).count()
-            + d_active_support.iter().filter(|&&seen| seen).count();
-        let full_active_slots = 2 * pair_active_support.len();
-        let pair_positions = pair_active_support.iter().filter(|&&seen| seen).count();
-        (
-            degree,
-            density,
-            pair_active_support.len(),
+        half_gcd_second_column_active_pair_anf_stats(
+            n,
+            &trace_pairs,
+            phase_mask,
+            &b_active_support,
+            &d_active_support,
+            &pair_active_support,
             max_pair,
-            active_slots,
-            full_active_slots,
-            pair_positions,
         )
     }
 
@@ -4874,41 +4934,76 @@ mod tests {
             (14usize, 16381u16, 2usize, 0b01usize),
         ];
         for &(n, p, window, phase_mask) in &cases {
-            let (
-                degree,
-                density,
-                max_positions,
-                max_pair,
-                active_slots,
-                full_active_slots,
-                pair_positions,
-            ) = half_gcd_second_column_wnaf_active_predicate_stats(
+            let stats = half_gcd_second_column_wnaf_active_predicate_stats(
                 n, p, window, phase_mask,
             );
             let table = 1usize << n;
             eprintln!(
-                "half-GCD second-column compact-wNAF active predicate: n={n}, window={window}, mask={phase_mask:#b}, degree={degree}, density={density}/{table}, positions={max_positions}, pair_positions={pair_positions}, active_slots={active_slots}/{full_active_slots}, max_pair={max_pair}"
+                "half-GCD second-column compact-wNAF active predicate: n={n}, window={window}, mask={phase_mask:#b}, degree={}, density={}/{table}, positions={}, pair_positions={}, active_slots={}/{}, max_pair={}, min_individual_degree={}, min_individual_density={}, max_individual_density={}",
+                stats.parity_degree,
+                stats.parity_density,
+                stats.max_positions,
+                stats.pair_positions,
+                stats.active_slots,
+                stats.full_active_slots,
+                stats.max_pair,
+                stats.min_individual_degree,
+                stats.min_individual_density,
+                stats.max_individual_density
             );
             if n == 14 {
-                println!("METRIC halfgcd_second_col_compact_wnaf_active_degree_n14={degree}");
-                println!("METRIC halfgcd_second_col_compact_wnaf_active_density_n14={density}");
-                println!("METRIC halfgcd_second_col_compact_wnaf_active_positions_n14={max_positions}");
-                println!("METRIC halfgcd_second_col_compact_wnaf_active_pair_positions_n14={pair_positions}");
-                println!("METRIC halfgcd_second_col_compact_wnaf_active_slots_n14={active_slots}");
-                println!("METRIC halfgcd_second_col_compact_wnaf_active_full_slots_n14={full_active_slots}");
-                println!("METRIC halfgcd_second_col_compact_wnaf_active_max_pair_n14={max_pair}");
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_degree_n14={}",
+                    stats.parity_degree
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_density_n14={}",
+                    stats.parity_density
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_positions_n14={}",
+                    stats.max_positions
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_pair_positions_n14={}",
+                    stats.pair_positions
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_slots_n14={}",
+                    stats.active_slots
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_full_slots_n14={}",
+                    stats.full_active_slots
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_max_pair_n14={}",
+                    stats.max_pair
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_min_individual_degree_n14={}",
+                    stats.min_individual_degree
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_min_individual_density_n14={}",
+                    stats.min_individual_density
+                );
+                println!(
+                    "METRIC halfgcd_second_col_compact_wnaf_active_max_individual_density_n14={}",
+                    stats.max_individual_density
+                );
             }
-            assert_eq!(max_pair, 0b11, "toy compact-wNAF active pairs stopped saturating");
+            assert_eq!(stats.max_pair, 0b11, "toy compact-wNAF active pairs stopped saturating");
             assert_eq!(
-                pair_positions, max_positions,
+                stats.pair_positions, stats.max_positions,
                 "compact-wNAF active pair positions became sparse enough to revisit support pruning"
             );
             assert!(
-                active_slots + 1 >= full_active_slots,
+                stats.active_slots + 1 >= stats.full_active_slots,
                 "compact-wNAF active slots became sparse enough to revisit active support pruning"
             );
-            assert!(degree + 1 >= n, "compact-wNAF active predicate unexpectedly low degree");
-            assert!(density > table / 4, "compact-wNAF active predicate unexpectedly sparse");
+            assert!(stats.parity_degree + 1 >= n, "compact-wNAF active predicate unexpectedly low degree");
+            assert!(stats.parity_density > table / 4, "compact-wNAF active predicate unexpectedly sparse");
         }
     }
 
@@ -4924,41 +5019,76 @@ mod tests {
             (14usize, 16381u16, 0b01usize),
         ];
         for &(n, p, phase_mask) in &cases {
-            let (
-                degree,
-                density,
-                max_positions,
-                max_pair,
-                active_slots,
-                full_active_slots,
-                pair_positions,
-            ) = half_gcd_second_column_joint_signed_binary_active_predicate_stats(
+            let stats = half_gcd_second_column_joint_signed_binary_active_predicate_stats(
                 n, p, phase_mask,
             );
             let table = 1usize << n;
             eprintln!(
-                "half-GCD second-column joint signed-binary active predicate: n={n}, mask={phase_mask:#b}, degree={degree}, density={density}/{table}, positions={max_positions}, pair_positions={pair_positions}, active_slots={active_slots}/{full_active_slots}, max_pair={max_pair}"
+                "half-GCD second-column joint signed-binary active predicate: n={n}, mask={phase_mask:#b}, degree={}, density={}/{table}, positions={}, pair_positions={}, active_slots={}/{}, max_pair={}, min_individual_degree={}, min_individual_density={}, max_individual_density={}",
+                stats.parity_degree,
+                stats.parity_density,
+                stats.max_positions,
+                stats.pair_positions,
+                stats.active_slots,
+                stats.full_active_slots,
+                stats.max_pair,
+                stats.min_individual_degree,
+                stats.min_individual_density,
+                stats.max_individual_density
             );
             if n == 14 {
-                println!("METRIC halfgcd_second_col_joint_signed_binary_active_degree_n14={degree}");
-                println!("METRIC halfgcd_second_col_joint_signed_binary_active_density_n14={density}");
-                println!("METRIC halfgcd_second_col_joint_signed_binary_active_positions_n14={max_positions}");
-                println!("METRIC halfgcd_second_col_joint_signed_binary_active_pair_positions_n14={pair_positions}");
-                println!("METRIC halfgcd_second_col_joint_signed_binary_active_slots_n14={active_slots}");
-                println!("METRIC halfgcd_second_col_joint_signed_binary_active_full_slots_n14={full_active_slots}");
-                println!("METRIC halfgcd_second_col_joint_signed_binary_active_max_pair_n14={max_pair}");
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_degree_n14={}",
+                    stats.parity_degree
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_density_n14={}",
+                    stats.parity_density
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_positions_n14={}",
+                    stats.max_positions
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_pair_positions_n14={}",
+                    stats.pair_positions
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_slots_n14={}",
+                    stats.active_slots
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_full_slots_n14={}",
+                    stats.full_active_slots
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_max_pair_n14={}",
+                    stats.max_pair
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_min_individual_degree_n14={}",
+                    stats.min_individual_degree
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_min_individual_density_n14={}",
+                    stats.min_individual_density
+                );
+                println!(
+                    "METRIC halfgcd_second_col_joint_signed_binary_active_max_individual_density_n14={}",
+                    stats.max_individual_density
+                );
             }
-            assert_eq!(max_pair, 0b11, "toy joint signed-binary active pairs stopped saturating");
+            assert_eq!(stats.max_pair, 0b11, "toy joint signed-binary active pairs stopped saturating");
             assert_eq!(
-                pair_positions, max_positions,
+                stats.pair_positions, stats.max_positions,
                 "joint signed-binary active pair positions became sparse enough to revisit support pruning"
             );
             assert!(
-                active_slots + 1 >= full_active_slots,
+                stats.active_slots + 1 >= stats.full_active_slots,
                 "joint signed-binary active slots became sparse enough to revisit active support pruning"
             );
-            assert!(degree + 1 >= n, "joint signed-binary active predicate unexpectedly low degree");
-            assert!(density > table / 4, "joint signed-binary active predicate unexpectedly sparse");
+            assert!(stats.parity_degree + 1 >= n, "joint signed-binary active predicate unexpectedly low degree");
+            assert!(stats.parity_density > table / 4, "joint signed-binary active predicate unexpectedly sparse");
         }
     }
 
