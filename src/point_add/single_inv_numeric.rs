@@ -22683,13 +22683,15 @@ mod tests {
         // Branch-as-final-digit only helps if the low/high coefficient branch
         // can be recovered without a full selector stream.  Give an arbitrary
         // local lookup more than the affine sign test: public step, low
-        // determinant residues up to 8 bits, live row signs, decoded quotient
+        // determinant residues up to 14 bits, live row signs, decoded quotient
         // sign, and low-candidate width/alignment metadata.  Remaining toy
         // collisions mean the branch bit is not a small local residue channel.
         let cases = [(8usize, 251u16), (10, 1021), (12, 4093), (14, 16381)];
-        let residue_bits = [2usize, 4, 6, 8];
+        let residue_bits = [2usize, 4, 6, 8, 10, 12, 14];
         let mut largest_k8_collisions = 0usize;
         let mut largest_k8_states = 0usize;
+        let mut largest_k14_collisions = 0usize;
+        let mut largest_k14_states = 0usize;
         for &(n, p) in &cases {
             for &k in &residue_bits {
                 let (collisions, ambiguous, states, high_count, max_mult) =
@@ -22707,6 +22709,9 @@ mod tests {
                 if k == 8 {
                     largest_k8_collisions = largest_k8_collisions.max(collisions);
                     largest_k8_states = largest_k8_states.max(states);
+                } else if k == 14 {
+                    largest_k14_collisions = largest_k14_collisions.max(collisions);
+                    largest_k14_states = largest_k14_states.max(states);
                 }
                 assert!(ambiguous > 0 && high_count > 0, "toy field did not exercise high/low branch");
                 assert!(
@@ -22717,9 +22722,11 @@ mod tests {
         }
         println!("METRIC centered_direct_restoring_final_high_branch_det_low8_largest_collisions={largest_k8_collisions}");
         println!("METRIC centered_direct_restoring_final_high_branch_det_low8_largest_states={largest_k8_states}");
+        println!("METRIC centered_direct_restoring_final_high_branch_det_low14_largest_collisions={largest_k14_collisions}");
+        println!("METRIC centered_direct_restoring_final_high_branch_det_low14_largest_states={largest_k14_states}");
         assert!(
-            largest_k8_collisions > 0,
-            "det-low8 plus signs and low-width metadata recovers the high branch; promote branch-final decoder"
+            largest_k14_collisions > 0,
+            "det-low14 plus signs and low-width metadata recovers the high branch; promote branch-final decoder"
         );
     }
 
