@@ -7132,12 +7132,47 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
+        let tail8_env =
+            vec![8usize; rows.iter().map(|row| row.tail_bits.len()).max().unwrap_or(0)];
+        let mut tail8_static_costs = rows
+            .iter()
+            .map(|row| {
+                pointadd_for_app(
+                    row,
+                    &full_prefix_env,
+                    &full_decoder_env,
+                    &tail8_env,
+                    row.app_static,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut guard1_prefix_env = full_prefix_env;
+        let mut guard1_decoder_env = full_decoder_env;
+        for bits in guard1_prefix_env.iter_mut().chain(guard1_decoder_env.iter_mut()) {
+            *bits = (*bits + 1).min(8);
+        }
+        let mut guard1_tail8_static_costs = rows
+            .iter()
+            .map(|row| {
+                pointadd_for_app(
+                    row,
+                    &guard1_prefix_env,
+                    &guard1_decoder_env,
+                    &tail8_env,
+                    row.app_static,
+                )
+            })
+            .collect::<Vec<_>>();
         let sample_mean = mean(&sample_costs);
         let full_mean = mean(&full_costs);
         let full_static_mean = mean(&full_static_costs);
+        let tail8_static_mean = mean(&tail8_static_costs);
+        let guard1_tail8_static_mean = mean(&guard1_tail8_static_costs);
         let sample_p99 = p99(&mut sample_costs);
         let full_p99 = p99(&mut full_costs);
         let full_static_p99 = p99(&mut full_static_costs);
+        let tail8_static_p99 = p99(&mut tail8_static_costs);
+        let guard1_tail8_static_p99 = p99(&mut guard1_tail8_static_costs);
         let full_first64 = rows
             .iter()
             .take(64)
@@ -7173,6 +7208,10 @@ mod tests {
         println!("METRIC halfgcd_fixed_depth64_slot_envelope_full_p99={full_p99}");
         println!("METRIC halfgcd_fixed_depth64_slot_envelope_static_app_mean={full_static_mean:.3}");
         println!("METRIC halfgcd_fixed_depth64_slot_envelope_static_app_p99={full_static_p99}");
+        println!("METRIC halfgcd_fixed_depth64_slot_envelope_tail8_static_app_mean={tail8_static_mean:.3}");
+        println!("METRIC halfgcd_fixed_depth64_slot_envelope_tail8_static_app_p99={tail8_static_p99}");
+        println!("METRIC halfgcd_fixed_depth64_slot_envelope_guard1_tail8_static_app_mean={guard1_tail8_static_mean:.3}");
+        println!("METRIC halfgcd_fixed_depth64_slot_envelope_guard1_tail8_static_app_p99={guard1_tail8_static_p99}");
         println!(
             "METRIC halfgcd_fixed_depth64_slot_envelope_full_gap_to_2700k={:.3}",
             full_mean - TARGET
@@ -7182,7 +7221,7 @@ mod tests {
             full_static_mean - TARGET
         );
         eprintln!(
-            "half-GCD fixed-depth64 public slot envelope: sample_mean={sample_mean:.1}, full_mean={full_mean:.1}, static_app={full_static_mean:.1}, first64={full_first64:.1}, full_p99={full_p99}, static_p99={full_static_p99}, high_slots=({prefix_high_slots},{decoder_high_slots},{tail_high_slots}), max_bits=({max_prefix_bits},{max_decoder_bits},{max_tail_bits}), adversarial_rows={adversarial_rows}"
+            "half-GCD fixed-depth64 public slot envelope: sample_mean={sample_mean:.1}, full_mean={full_mean:.1}, static_app={full_static_mean:.1}, tail8_static={tail8_static_mean:.1}, guard1_tail8_static={guard1_tail8_static_mean:.1}, first64={full_first64:.1}, full_p99={full_p99}, static_p99={full_static_p99}, tail8_p99={tail8_static_p99}, guard1_tail8_p99={guard1_tail8_static_p99}, high_slots=({prefix_high_slots},{decoder_high_slots},{tail_high_slots}), max_bits=({max_prefix_bits},{max_decoder_bits},{max_tail_bits}), adversarial_rows={adversarial_rows}"
         );
         assert!(max_prefix_bits >= 8 && max_decoder_bits >= 8 && max_tail_bits >= 8);
         assert!(
@@ -7192,6 +7231,239 @@ mod tests {
         assert!(
             full_static_mean < TARGET && full_static_p99 < TARGET as isize,
             "public per-slot half-GCD envelope cannot carry static quantum coefficient application"
+        );
+        assert!(
+            tail8_static_mean < TARGET && tail8_static_p99 > TARGET as isize,
+            "exact-tail public half-GCD guard changed category; revisit tail proof priority"
+        );
+        assert!(
+            guard1_tail8_static_mean > TARGET && guard1_tail8_static_p99 > TARGET as isize,
+            "one extra prefix/decoder layer plus exact tail now fits; revisit slot proof path"
+        );
+    }
+
+    #[test]
+    fn half_gcd_public_slot_envelope_target_rows_do_not_cover_exact_toys() {
+        // The secp-sized slot envelope cannot be exhausted directly.  Before
+        // treating the targeted rows as proof-shaped evidence, check the same
+        // pattern on small prime fields where every nonzero denominator can be
+        // enumerated.  The result is intentionally a negative guardrail:
+        // target rows find the secp high-layer slots, but they are not an exact
+        // proof method for the public per-slot envelope.
+        #[derive(Clone, Debug)]
+        struct ToyEnvelope {
+            prefix: Vec<usize>,
+            decoder: Vec<usize>,
+            tail: Vec<usize>,
+        }
+
+        fn bit_len_u128(x: u128) -> usize {
+            if x == 0 { 0 } else { 128 - x.leading_zeros() as usize }
+        }
+
+        fn update_slot(env: &mut Vec<usize>, slot: usize, bits: usize) {
+            if env.len() <= slot {
+                env.resize(slot + 1, 0);
+            }
+            env[slot] = env[slot].max(bits);
+        }
+
+        fn update_row(env: &mut ToyEnvelope, x: usize, p: usize, depth: usize) {
+            let mut u = p as i128;
+            let mut v = x as i128;
+            let mut b = 0i128;
+            let mut d = 1i128;
+            let mut step = 0usize;
+
+            while step < depth && v != 0 {
+                let q = u / v;
+                let rem = u - q * v;
+                let prefix_top = bit_len_u128(u.unsigned_abs())
+                    .saturating_sub(bit_len_u128(v.unsigned_abs()));
+                env.prefix[step] = env.prefix[step]
+                    .max(usize_bit_len_for_payload_test(prefix_top));
+
+                let nb = d;
+                let nd = b - q * d;
+                let numer = if b == 0 {
+                    nd.unsigned_abs()
+                } else {
+                    nd.unsigned_abs()
+                        .checked_sub(1)
+                        .expect("toy slot decoder numerator underflow")
+                };
+                let denom = nb.unsigned_abs();
+                assert!(denom != 0, "toy slot decoder denominator vanished");
+                assert_eq!(
+                    numer / denom,
+                    q as u128,
+                    "toy slot decoder quotient mismatch"
+                );
+                let decoder_top =
+                    bit_len_u128(numer).saturating_sub(bit_len_u128(denom));
+                env.decoder[step] = env.decoder[step]
+                    .max(usize_bit_len_for_payload_test(decoder_top));
+
+                u = v;
+                v = rem;
+                b = nb;
+                d = nd;
+                step += 1;
+            }
+
+            let mut tail_slot = 0usize;
+            while v != 0 {
+                let q = u / v;
+                let q_bits = bit_len_u128(q as u128);
+                update_slot(
+                    &mut env.tail,
+                    tail_slot,
+                    usize_bit_len_for_payload_test(q_bits.saturating_sub(1)),
+                );
+                let rem = u - q * v;
+                u = v;
+                v = rem;
+                tail_slot += 1;
+            }
+            assert_eq!(u, 1, "toy public slot tail missed gcd 1");
+        }
+
+        fn merge_rows(xs: &[usize], p: usize, depth: usize) -> ToyEnvelope {
+            let mut env = ToyEnvelope {
+                prefix: vec![0; depth],
+                decoder: vec![0; depth],
+                tail: Vec::new(),
+            };
+            for &x in xs {
+                if x > 0 && x < p {
+                    update_row(&mut env, x, p, depth);
+                }
+            }
+            env
+        }
+
+        fn max_gap(exact: &[usize], target: &[usize]) -> usize {
+            exact
+                .iter()
+                .enumerate()
+                .map(|(i, &bits)| bits.saturating_sub(target.get(i).copied().unwrap_or(0)))
+                .max()
+                .unwrap_or(0)
+        }
+
+        let cases = [
+            (8usize, 251usize),
+            (10, 1021),
+            (12, 4093),
+            (14, 16_381),
+            (16, 65_521),
+        ];
+        let mut covered_cases = 0usize;
+        let mut largest_target_rows = 0usize;
+        let mut largest_exact_rows = 0usize;
+        let mut largest_prefix_gap = 0usize;
+        let mut largest_decoder_gap = 0usize;
+        let mut largest_tail_gap = 0usize;
+        let mut n16_target_rows = 0usize;
+        let mut n16_prefix_max = 0usize;
+        let mut n16_decoder_max = 0usize;
+        let mut n16_tail_max = 0usize;
+        let mut n16_tail_slots = 0usize;
+
+        for &(n, p) in &cases {
+            let depth = (n / 4).max(1);
+            let exact_xs = (1..p).collect::<Vec<_>>();
+            let exact = merge_rows(&exact_xs, p, depth);
+
+            let mut target = std::collections::BTreeSet::<usize>::new();
+            let small_limit = (1usize << (n / 2).max(1)).min(p - 1);
+            for x in 1..=small_limit {
+                target.insert(x);
+                target.insert(p - x);
+            }
+
+            let mut num_prev2 = 0usize;
+            let mut num_prev1 = 1usize;
+            let mut den_prev2 = 1usize;
+            let mut den_prev1 = 0usize;
+            for _ in 0..depth {
+                let num = num_prev1 + num_prev2;
+                let den = den_prev1 + den_prev2;
+                num_prev2 = num_prev1;
+                num_prev1 = num;
+                den_prev2 = den_prev1;
+                den_prev1 = den;
+            }
+            let center = (p * den_prev1) / num_prev1;
+            let radius = (1usize << (n / 3).max(1)).min(512);
+            for delta in 0..=radius {
+                if center > delta {
+                    target.insert(center - delta);
+                }
+                let hi = center + delta;
+                if hi < p {
+                    target.insert(hi);
+                }
+            }
+
+            let target_xs = target.into_iter().collect::<Vec<_>>();
+            let target_env = merge_rows(&target_xs, p, depth);
+            let prefix_gap = max_gap(&exact.prefix, &target_env.prefix);
+            let decoder_gap = max_gap(&exact.decoder, &target_env.decoder);
+            let tail_gap = max_gap(&exact.tail, &target_env.tail);
+            let covered = prefix_gap == 0 && decoder_gap == 0 && tail_gap == 0;
+            covered_cases += covered as usize;
+            largest_target_rows = largest_target_rows.max(target_xs.len());
+            largest_exact_rows = largest_exact_rows.max(exact_xs.len());
+            largest_prefix_gap = largest_prefix_gap.max(prefix_gap);
+            largest_decoder_gap = largest_decoder_gap.max(decoder_gap);
+            largest_tail_gap = largest_tail_gap.max(tail_gap);
+
+            let prefix_max = exact.prefix.iter().copied().max().unwrap_or(0);
+            let decoder_max = exact.decoder.iter().copied().max().unwrap_or(0);
+            let tail_max = exact.tail.iter().copied().max().unwrap_or(0);
+            eprintln!(
+                "half-GCD toy slot envelope n={n}: exact_rows={}, target_rows={}, covered={covered}, prefix={:?}->{:?}, decoder={:?}->{:?}, tail_len={} tail_max={} gap=({prefix_gap},{decoder_gap},{tail_gap})",
+                exact_xs.len(),
+                target_xs.len(),
+                target_env.prefix,
+                exact.prefix,
+                target_env.decoder,
+                exact.decoder,
+                exact.tail.len(),
+                tail_max,
+            );
+            if n == 16 {
+                n16_target_rows = target_xs.len();
+                n16_prefix_max = prefix_max;
+                n16_decoder_max = decoder_max;
+                n16_tail_max = tail_max;
+                n16_tail_slots = exact.tail.len();
+            }
+        }
+
+        println!("METRIC halfgcd_slot_envelope_toy_cases={}", cases.len());
+        println!("METRIC halfgcd_slot_envelope_toy_covered_cases={covered_cases}");
+        println!("METRIC halfgcd_slot_envelope_toy_largest_exact_rows={largest_exact_rows}");
+        println!("METRIC halfgcd_slot_envelope_toy_largest_target_rows={largest_target_rows}");
+        println!("METRIC halfgcd_slot_envelope_toy_largest_prefix_gap={largest_prefix_gap}");
+        println!("METRIC halfgcd_slot_envelope_toy_largest_decoder_gap={largest_decoder_gap}");
+        println!("METRIC halfgcd_slot_envelope_toy_largest_tail_gap={largest_tail_gap}");
+        println!("METRIC halfgcd_slot_envelope_toy_n16_target_rows={n16_target_rows}");
+        println!("METRIC halfgcd_slot_envelope_toy_n16_prefix_max_bits={n16_prefix_max}");
+        println!("METRIC halfgcd_slot_envelope_toy_n16_decoder_max_bits={n16_decoder_max}");
+        println!("METRIC halfgcd_slot_envelope_toy_n16_tail_max_bits={n16_tail_max}");
+        println!("METRIC halfgcd_slot_envelope_toy_n16_tail_slots={n16_tail_slots}");
+        assert_eq!(
+            covered_cases, 0,
+            "targeted half-GCD slot rows now cover exact toy domains; revisit the secp proof path"
+        );
+        assert_eq!(largest_prefix_gap, 1, "toy prefix gap changed; refresh slot-envelope blocker");
+        assert_eq!(largest_decoder_gap, 1, "toy decoder gap changed; refresh slot-envelope blocker");
+        assert_eq!(largest_tail_gap, 3, "toy tail gap changed; refresh slot-envelope blocker");
+        assert!(
+            largest_target_rows < largest_exact_rows / 2,
+            "toy target set became too close to exhaustive to support the secp proof path"
         );
     }
 

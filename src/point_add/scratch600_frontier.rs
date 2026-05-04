@@ -247,7 +247,7 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             name: "halfgcd_second_column_fixed_depth64_public_slot_envelope",
             scratch_bits: 515,
             charged_toffoli: None,
-            blocker: "sample plus targeted adversarial slot envelope has only 3 prefix, 3 decoder, and 1 tail high-layer slots; popcount app projects 2345809 mean / 2408100 p99 and static quantum coefficient application projects 2539415 mean / 2612732 p99, but this is not production-charged until the per-slot envelope is proved for the full secp domain and the fixed-depth extractor/application circuit is wired and cleaned",
+            blocker: "sample plus targeted adversarial slot envelope has only 3 prefix, 3 decoder, and 1 tail high-layer slots; popcount app projects 2345809 mean / 2408100 p99 and static quantum coefficient application projects 2539415 mean / 2612732 p99, but exact toy domains n=8..16 show target rows miss the full slot envelope in 5/5 cases. Charging a conservative 8-bit tail already pushes p99 to 2711178, and a one-layer prefix/decoder guard pushes mean to 2715840, so this is not production-charged until the per-slot envelope is actually proved for secp and the fixed-depth extractor/application circuit is wired and cleaned",
         },
         Candidate {
             name: "halfgcd_second_column_fixed_depth64_tail_stream",
@@ -1589,6 +1589,21 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
     let halfgcd_second_col_fixed_depth64_slot_envelope_static_app_gap =
         halfgcd_second_col_fixed_depth64_slot_envelope_static_app_mean as isize
             - GOOGLE_LOW_QUBIT_TOFFOLI as isize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_mean =
+        2_639_116usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_p99 =
+        2_711_178usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_mean =
+        2_715_840usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_p99 =
+        2_789_094usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_toy_cases = 5usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_toy_covered_cases = 0usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_prefix_gap = 1usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_decoder_gap = 1usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_tail_gap = 3usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_toy_n16_target_rows = 577usize;
+    let halfgcd_second_col_fixed_depth64_slot_envelope_toy_n16_tail_slots = 15usize;
     let halfgcd_second_col_fixed_depth64_static_app_mean = 2_934_322usize;
     let halfgcd_second_col_fixed_depth64_static_app_p99 = 3_010_096usize;
     let halfgcd_second_col_fixed_depth64_static_app_gap =
@@ -2843,8 +2858,19 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_full_p99={halfgcd_second_col_fixed_depth64_slot_envelope_full_p99}");
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_static_app_mean={halfgcd_second_col_fixed_depth64_slot_envelope_static_app_mean}");
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_static_app_p99={halfgcd_second_col_fixed_depth64_slot_envelope_static_app_p99}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_mean={halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_mean}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_p99={halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_p99}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_mean={halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_mean}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_p99={halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_p99}");
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_full_gap_to_2700k={halfgcd_second_col_fixed_depth64_slot_envelope_full_gap}");
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_static_app_gap_to_2700k={halfgcd_second_col_fixed_depth64_slot_envelope_static_app_gap}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_toy_cases={halfgcd_second_col_fixed_depth64_slot_envelope_toy_cases}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_toy_covered_cases={halfgcd_second_col_fixed_depth64_slot_envelope_toy_covered_cases}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_prefix_gap={halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_prefix_gap}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_decoder_gap={halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_decoder_gap}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_tail_gap={halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_tail_gap}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_toy_n16_target_rows={halfgcd_second_col_fixed_depth64_slot_envelope_toy_n16_target_rows}");
+    println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_slot_envelope_toy_n16_tail_slots={halfgcd_second_col_fixed_depth64_slot_envelope_toy_n16_tail_slots}");
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_static_app_mean={halfgcd_second_col_fixed_depth64_static_app_mean}");
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_static_app_p99={halfgcd_second_col_fixed_depth64_static_app_p99}");
     println!("METRIC scratch600_halfgcd_second_col_fixed_depth64_static_app_gap_to_2700k={halfgcd_second_col_fixed_depth64_static_app_gap}");
@@ -4206,7 +4232,20 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             && halfgcd_second_col_fixed_depth64_slot_envelope_static_app_mean
                 < GOOGLE_LOW_QUBIT_TOFFOLI
             && halfgcd_second_col_fixed_depth64_slot_envelope_static_app_p99
-                < GOOGLE_LOW_QUBIT_TOFFOLI,
+                < GOOGLE_LOW_QUBIT_TOFFOLI
+            && halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_mean
+                < GOOGLE_LOW_QUBIT_TOFFOLI
+            && halfgcd_second_col_fixed_depth64_slot_envelope_tail8_static_app_p99
+                > GOOGLE_LOW_QUBIT_TOFFOLI
+            && halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_mean
+                > GOOGLE_LOW_QUBIT_TOFFOLI
+            && halfgcd_second_col_fixed_depth64_slot_envelope_guard1_tail8_static_app_p99
+                > GOOGLE_LOW_QUBIT_TOFFOLI
+            && halfgcd_second_col_fixed_depth64_slot_envelope_toy_cases == 5
+            && halfgcd_second_col_fixed_depth64_slot_envelope_toy_covered_cases == 0
+            && halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_prefix_gap == 1
+            && halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_decoder_gap == 1
+            && halfgcd_second_col_fixed_depth64_slot_envelope_toy_largest_tail_gap == 3,
         "half-GCD public slot envelope no longer gives a SOTA-shaped extractor/application ledger"
     );
     assert!(
