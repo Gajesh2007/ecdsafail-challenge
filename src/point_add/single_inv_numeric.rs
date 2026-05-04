@@ -29882,6 +29882,36 @@ mod tests {
     }
 
     #[test]
+    fn direct_centered_signnorm_coeff_rows_break_reverse_sign_collision() {
+        // Magnitude-only reverse state is ambiguous.  A real extended Euclid
+        // route also carries the second-column coefficient rows, so first check
+        // whether those post-step rows disambiguate the normalization sign.  If
+        // they collide too, sign-normalized direct-centered Euclid needs an
+        // explicit sign history.  If not, the next hard piece is a local
+        // recovery circuit from live rows rather than a larger sidecar.
+        let cases = [(8usize, 251u16), (10, 1021), (12, 4093), (14, 16381)];
+        for &(n, p) in &cases {
+            let (collisions, total_steps, states, max_mult, zero_coeff_cases) =
+                direct_centered_signnorm_reverse_coeff_image_collision_stats(p);
+            eprintln!(
+                "direct-centered signnorm coefficient reverse image: n={n}, collisions={collisions}, states={states}, total_steps={total_steps}, max_mult={max_mult}, zero_coeff_cases={zero_coeff_cases}"
+            );
+            if n == 14 {
+                println!("METRIC centered_direct_signnorm_coeff_reverse_collisions_n14={collisions}");
+                println!("METRIC centered_direct_signnorm_coeff_reverse_states_n14={states}");
+                println!("METRIC centered_direct_signnorm_coeff_reverse_total_steps_n14={total_steps}");
+                println!("METRIC centered_direct_signnorm_coeff_reverse_max_mult_n14={max_mult}");
+                println!("METRIC centered_direct_signnorm_coeff_reverse_zero_coeff_cases_n14={zero_coeff_cases}");
+            }
+            assert_eq!(
+                collisions, 0,
+                "post-step coefficient rows do not recover normalization signs on the exact toy image"
+            );
+            assert_eq!(max_mult, 1, "coefficient image has unexpected sign multiplicity");
+        }
+    }
+
+    #[test]
     fn euclid_quotient_stream_entropy_also_exceeds_scratch600() {
         // Follow-up to the raw-payload quotient-stream DIV test.  The tempting
         // objection is that a clever prefix/arithmetic code could pack the
@@ -30325,6 +30355,54 @@ mod tests {
             .max()
             .unwrap_or(0);
         (collisions, total_steps, image.len(), max_mult)
+    }
+
+    fn direct_centered_signnorm_reverse_coeff_image_collision_stats(
+        p: u16,
+    ) -> (usize, usize, usize, usize, usize) {
+        use std::collections::BTreeMap;
+        let mut image: BTreeMap<(usize, i128, i128, i128, i128, i128), u8> =
+            BTreeMap::new();
+        let mut total_steps = 0usize;
+        let mut zero_coeff_cases = 0usize;
+        for x in 1..p {
+            let mut u = p as i128;
+            let mut v = x as i128;
+            let mut coeff_u = 0i128;
+            let mut coeff_v = 1i128;
+            let mut step = 0usize;
+            while v != 0 {
+                let adjusted = u + (v >> 1);
+                let q = adjusted / v;
+                let rem = u - q * v;
+                let sign = (rem < 0) as u8;
+                let next_v = rem.abs();
+                let mut next_coeff = coeff_u - q * coeff_v;
+                if sign != 0 {
+                    next_coeff = -next_coeff;
+                }
+                if next_v != 0 {
+                    let entry = image
+                        .entry((step, v, next_v, q, coeff_v, next_coeff))
+                        .or_insert(0);
+                    *entry |= 1u8 << sign;
+                    total_steps += 1;
+                    zero_coeff_cases += (next_coeff == 0) as usize;
+                }
+                u = v;
+                v = next_v;
+                coeff_u = coeff_v;
+                coeff_v = next_coeff;
+                step += 1;
+            }
+        }
+        let collisions = image.values().filter(|&&mask| mask == 0b11).count();
+        let max_mult = image
+            .values()
+            .map(|mask| mask.count_ones() as usize)
+            .max()
+            .unwrap_or(0);
+        (collisions, total_steps, image.len(), max_mult, zero_coeff_cases)
     }
 
     fn direct_centered_restoring_final_reverse_q_collision_stats(

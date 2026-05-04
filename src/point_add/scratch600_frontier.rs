@@ -139,13 +139,13 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             name: "direct_centered_signnorm_raw_digits_only",
             scratch_bits: 653,
             charged_toffoli: None,
-            blocker: "raw sign-normalized digits fit, but exact cneg p99 is 2792914; norm signs have dense MBU parity and exact toy reverse collisions",
+            blocker: "raw sign-normalized digits fit, but exact cneg p99 is 2792914; norm signs have dense MBU parity and magnitude-only exact toy reverse collisions. Post-step coefficient rows disambiguate the sign on exact toys (n14 collisions 0/89008), so revival needs a phase-clean local row-recovery circuit rather than a larger sidecar",
         },
         Candidate {
             name: "direct_centered_signnorm_logical_coeff_signs",
             scratch_bits: 765,
             charged_toffoli: Some(2_746_960),
-            blocker: "logical coefficient signs keep rem-only direct cneg phase-clean in toy, but direct split p99 is still 46960 over target, exact-rem split is 94228 over, and normalization-sign scratch remains 765 p99",
+            blocker: "logical coefficient signs keep rem-only direct cneg phase-clean in toy, but direct split p99 is still 46960 over target, exact-rem split is 94228 over, and normalization-sign scratch remains 765 p99 unless the new coefficient-row sign disambiguation is turned into a cheap local recovery circuit",
         },
         Candidate {
             name: "direct_centered_restoring_final_stored_alignment",
@@ -399,6 +399,11 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
     let direct_signnorm_reverse_collisions_n14 = 2_658usize;
     let direct_signnorm_reverse_states_n14 = 64_178usize;
     let direct_signnorm_reverse_total_steps_n14 = 89_008usize;
+    let direct_signnorm_coeff_reverse_collisions_n14 = 0usize;
+    let direct_signnorm_coeff_reverse_states_n14 = 89_008usize;
+    let direct_signnorm_coeff_reverse_total_steps_n14 = 89_008usize;
+    let direct_signnorm_coeff_reverse_max_mult_n14 = 1usize;
+    let direct_signnorm_coeff_reverse_zero_coeff_cases_n14 = 0usize;
     let direct_restoring_final_coeff_width_p99 = 47_654usize;
     let direct_restoring_final_digit_payload_p99 = 362usize;
     let direct_restoring_final_raw_digit_scratch_p99 = 256usize + direct_restoring_final_digit_payload_p99;
@@ -1702,6 +1707,11 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
     println!("METRIC scratch600_direct_signnorm_reverse_collisions_n14={direct_signnorm_reverse_collisions_n14}");
     println!("METRIC scratch600_direct_signnorm_reverse_states_n14={direct_signnorm_reverse_states_n14}");
     println!("METRIC scratch600_direct_signnorm_reverse_total_steps_n14={direct_signnorm_reverse_total_steps_n14}");
+    println!("METRIC scratch600_direct_signnorm_coeff_reverse_collisions_n14={direct_signnorm_coeff_reverse_collisions_n14}");
+    println!("METRIC scratch600_direct_signnorm_coeff_reverse_states_n14={direct_signnorm_coeff_reverse_states_n14}");
+    println!("METRIC scratch600_direct_signnorm_coeff_reverse_total_steps_n14={direct_signnorm_coeff_reverse_total_steps_n14}");
+    println!("METRIC scratch600_direct_signnorm_coeff_reverse_max_mult_n14={direct_signnorm_coeff_reverse_max_mult_n14}");
+    println!("METRIC scratch600_direct_signnorm_coeff_reverse_zero_coeff_cases_n14={direct_signnorm_coeff_reverse_zero_coeff_cases_n14}");
     println!("METRIC scratch600_direct_restoring_final_coeff_width_p99={direct_restoring_final_coeff_width_p99}");
     println!("METRIC scratch600_direct_restoring_final_digit_payload_p99={direct_restoring_final_digit_payload_p99}");
     println!("METRIC scratch600_direct_restoring_final_raw_digit_scratch_p99={direct_restoring_final_raw_digit_scratch_p99}");
@@ -2747,6 +2757,15 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             && direct_signnorm_reverse_states_n14 > 60_000
             && direct_signnorm_reverse_total_steps_n14 > 80_000,
         "normalization signs may be reverse-recoverable now; revisit sign-normalized direct route"
+    );
+    assert!(
+        direct_signnorm_coeff_reverse_collisions_n14 == 0
+            && direct_signnorm_coeff_reverse_states_n14 == direct_signnorm_reverse_total_steps_n14
+            && direct_signnorm_coeff_reverse_total_steps_n14
+                == direct_signnorm_reverse_total_steps_n14
+            && direct_signnorm_coeff_reverse_max_mult_n14 == 1
+            && direct_signnorm_coeff_reverse_zero_coeff_cases_n14 == 0,
+        "coefficient rows stopped disambiguating sign-normalized reverse signs; require explicit sign history again"
     );
     assert!(
         direct_restoring_final_raw_digit_over_strict > 0
