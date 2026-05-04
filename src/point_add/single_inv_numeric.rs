@@ -22439,6 +22439,43 @@ mod tests {
     }
 
     #[test]
+    fn direct_centered_restoring_final_block_joint_rank_bits_are_dense() {
+        // The mixed 4..8 block-joint binary-depth floor only helps if the block
+        // pattern rank can be decoded phase-cleanly.  Treat the exact toy
+        // block rank as the hidden side channel and check whether a generic
+        // rank-bit cleanup has low-degree structure.  It does not: even the
+        // period-4 schedule that opens the sampled floor gives dense,
+        // growing-degree rank parity on toy secp-shaped fields.
+        let schedule = [6usize, 5, 6, 8];
+        let rank_mask = 0b1011usize;
+        let cases = [(8usize, 251u16), (10, 1021), (12, 4093), (14, 16381)];
+        for &(n, p) in &cases {
+            let (degree, density, max_rank, max_patterns, support_rows, max_blocks) =
+                direct_centered_restoring_final_block_joint_rank_anf_stats(
+                    n,
+                    p,
+                    &schedule,
+                    rank_mask,
+                );
+            let table = 1usize << n;
+            eprintln!(
+                "direct-centered restoring-final block-joint rank ANF: n={n}, degree={degree}, density={density}/{table}, max_rank={max_rank}, max_patterns={max_patterns}, support_rows={support_rows}, max_blocks={max_blocks}"
+            );
+            if n == 14 {
+                println!("METRIC centered_direct_restoring_final_block_joint_rank_degree_n14={degree}");
+                println!("METRIC centered_direct_restoring_final_block_joint_rank_density_n14={density}");
+                println!("METRIC centered_direct_restoring_final_block_joint_rank_max_rank_n14={max_rank}");
+                println!("METRIC centered_direct_restoring_final_block_joint_rank_max_patterns_n14={max_patterns}");
+                println!("METRIC centered_direct_restoring_final_block_joint_rank_support_rows_n14={support_rows}");
+                println!("METRIC centered_direct_restoring_final_block_joint_rank_max_blocks_n14={max_blocks}");
+            }
+            assert!(max_patterns > 1, "toy block-rank support collapsed");
+            assert!(degree + 1 >= n, "block-joint rank parity unexpectedly low degree");
+            assert!(density > table / 4, "block-joint rank parity unexpectedly sparse");
+        }
+    }
+
+    #[test]
     fn direct_centered_signnorm_normalization_sign_mbu_is_dense_too() {
         // The sign-normalized direct-centered route keeps quotient signs on the
         // phase-clean q_neg=false path by recording when the centered remainder
@@ -23238,6 +23275,157 @@ mod tests {
             .max()
             .unwrap_or(0);
         (degree, density, max_alignment)
+    }
+
+    fn direct_centered_restoring_final_block_joint_rank_anf_stats(
+        n: usize,
+        p: u16,
+        schedule: &[usize],
+        rank_mask: usize,
+    ) -> (usize, usize, usize, usize, usize, usize) {
+        use std::collections::BTreeSet;
+
+        assert!(!schedule.is_empty(), "block-rank schedule is empty");
+        let size = 1usize << n;
+        let bit_len = |z: u128| -> usize {
+            if z == 0 {
+                0
+            } else {
+                128usize - z.leading_zeros() as usize
+            }
+        };
+        let trace_symbols = |x: u16| -> Vec<(usize, usize)> {
+            let mut u = p as i128;
+            let mut v = x as i128;
+            let mut coeff_u = 0i128;
+            let mut coeff_v = 1i128;
+            let mut symbols = Vec::new();
+            let mut step = 0usize;
+            while v != 0 {
+                let abs_u = u.unsigned_abs();
+                let abs_v = v.unsigned_abs();
+                let adjusted = abs_u + (abs_v >> 1);
+                let q_abs = adjusted / abs_v;
+                let q_signed = if (u < 0) ^ (v < 0) {
+                    -(q_abs as i128)
+                } else {
+                    q_abs as i128
+                };
+                let next_v = u - q_signed * v;
+                let next_coeff_v = coeff_u - q_signed * coeff_v;
+                let denom = coeff_v.unsigned_abs();
+                assert!(denom > 0, "coefficient decoder denominator vanished");
+                let next_abs = next_coeff_v.unsigned_abs();
+                let low_numer = if coeff_u == 0 {
+                    next_abs
+                } else {
+                    assert!(next_abs > 0, "coefficient decoder numerator underflowed");
+                    next_abs - 1
+                };
+                let high_numer = if coeff_u == 0 {
+                    low_numer
+                } else {
+                    next_abs + denom - 1
+                };
+                let low_q = low_numer / denom;
+                let high_q = high_numer / denom;
+                let high_branch = q_abs != low_q;
+                let numer = if high_branch {
+                    assert_eq!(q_abs, high_q, "coefficient decoder q escaped candidates");
+                    high_numer
+                } else {
+                    low_numer
+                };
+                let alignment = bit_len(numer).saturating_sub(bit_len(denom));
+                symbols.push((2 * step, alignment));
+                if low_q != high_q {
+                    symbols.push((2 * step + 1, high_branch as usize));
+                }
+                u = v;
+                v = next_v;
+                coeff_u = coeff_v;
+                coeff_v = next_coeff_v;
+                step += 1;
+            }
+            symbols
+        };
+        let blocks_for_symbols = |symbols: &[(usize, usize)]| -> Vec<Vec<(usize, usize)>> {
+            let mut blocks = Vec::new();
+            let mut pos = 0usize;
+            let mut block_idx = 0usize;
+            while pos < symbols.len() {
+                let block_len = schedule[block_idx % schedule.len()]
+                    .min(symbols.len() - pos);
+                blocks.push(symbols[pos..pos + block_len].to_vec());
+                pos += block_len;
+                block_idx += 1;
+            }
+            blocks
+        };
+
+        let mut pattern_sets = Vec::<BTreeSet<Vec<(usize, usize)>>>::new();
+        let mut traces = Vec::new();
+        for x in 1..p {
+            let symbols = trace_symbols(x);
+            let blocks = blocks_for_symbols(&symbols);
+            for (block_idx, block) in blocks.iter().enumerate() {
+                while pattern_sets.len() <= block_idx {
+                    pattern_sets.push(BTreeSet::new());
+                }
+                pattern_sets[block_idx].insert(block.clone());
+            }
+            traces.push((x as usize, blocks));
+        }
+        let patterns: Vec<Vec<Vec<(usize, usize)>>> = pattern_sets
+            .into_iter()
+            .map(|set| set.into_iter().collect())
+            .collect();
+        let total_support_rows = patterns
+            .iter()
+            .map(|block_patterns| block_patterns.len().saturating_sub(1))
+            .sum::<usize>();
+        let max_patterns = patterns
+            .iter()
+            .map(|block_patterns| block_patterns.len())
+            .max()
+            .unwrap_or(0);
+        let mut anf = vec![0u8; size];
+        let mut max_rank = 0usize;
+        let mut max_blocks = 0usize;
+        for (x, blocks) in traces {
+            max_blocks = max_blocks.max(blocks.len());
+            let mut parity = 0u8;
+            for (block_idx, block) in blocks.iter().enumerate() {
+                let rank = patterns[block_idx]
+                    .binary_search(block)
+                    .expect("seen block missing from rank table");
+                max_rank = max_rank.max(rank);
+                parity ^= ((rank & rank_mask).count_ones() as u8) & 1;
+            }
+            anf[x] = parity;
+        }
+        for bit in 0..n {
+            for idx in 0..size {
+                if (idx & (1usize << bit)) != 0 {
+                    anf[idx] ^= anf[idx ^ (1usize << bit)];
+                }
+            }
+        }
+        let density = anf.iter().filter(|&&c| c != 0).count();
+        let degree = anf
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &c)| if c != 0 { Some(i.count_ones() as usize) } else { None })
+            .max()
+            .unwrap_or(0);
+        (
+            degree,
+            density,
+            max_rank,
+            max_patterns,
+            total_support_rows,
+            max_blocks,
+        )
     }
 
     fn direct_centered_restoring_final_coeff_decoder_costs_for_test(

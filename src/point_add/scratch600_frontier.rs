@@ -157,7 +157,7 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             name: "direct_centered_restoring_final_mixed4to8_joint_binary_floor",
             scratch_bits: 663,
             charged_toffoli: Some(2_693_369),
-            blocker: "joint block-pattern binary-depth floor would clear 2.7M by 6631 at 663 scratch, but assumes a phase-clean block-rank decoder; arbitrary full-scan support is 68058 rows and misses by 498777",
+            blocker: "joint block-pattern binary-depth floor would clear 2.7M by 6631 at 663 scratch, but assumes a phase-clean block-rank decoder; exact n14 rank parity is degree 14 and 8098/16384 dense, while arbitrary full-scan support is 68058 rows and misses by 498777",
         },
         Candidate {
             name: "direct_centered_restoring_final_mixed67_huffman_floor",
@@ -658,6 +658,12 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
         138_376.848f64;
     let direct_restoring_final_cond_mixed4to8_with_block_joint_scan_lookup_2x_gap =
         498_777.392f64;
+    let direct_restoring_final_block_joint_rank_degree_n14 = 14usize;
+    let direct_restoring_final_block_joint_rank_density_n14 = 8_098usize;
+    let direct_restoring_final_block_joint_rank_max_rank_n14 = 2_938usize;
+    let direct_restoring_final_block_joint_rank_max_patterns_n14 = 2_939usize;
+    let direct_restoring_final_block_joint_rank_support_rows_n14 = 3_474usize;
+    let direct_restoring_final_block_joint_rank_max_blocks_n14 = 4usize;
     let direct_restoring_final_huffman_tree_toy_compare_ccx = 30usize;
     let direct_restoring_final_huffman_tree_toy_forward_ccx = 34usize;
     let direct_restoring_final_huffman_tree_toy_roundtrip_ccx = 68usize;
@@ -1374,6 +1380,12 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
     println!("METRIC scratch600_direct_restoring_final_cond_mixed4to8_block_joint_lookup_multiplier_budget={direct_restoring_final_cond_mixed4to8_block_joint_lookup_multiplier_budget:.6}");
     println!("METRIC scratch600_direct_restoring_final_cond_mixed4to8_with_block_joint_scan_lookup_2x_mean={direct_restoring_final_cond_mixed4to8_with_block_joint_scan_lookup_2x_mean:.3}");
     println!("METRIC scratch600_direct_restoring_final_cond_mixed4to8_with_block_joint_scan_lookup_2x_gap_to_2700k={direct_restoring_final_cond_mixed4to8_with_block_joint_scan_lookup_2x_gap:.3}");
+    println!("METRIC scratch600_direct_restoring_final_block_joint_rank_degree_n14={direct_restoring_final_block_joint_rank_degree_n14}");
+    println!("METRIC scratch600_direct_restoring_final_block_joint_rank_density_n14={direct_restoring_final_block_joint_rank_density_n14}");
+    println!("METRIC scratch600_direct_restoring_final_block_joint_rank_max_rank_n14={direct_restoring_final_block_joint_rank_max_rank_n14}");
+    println!("METRIC scratch600_direct_restoring_final_block_joint_rank_max_patterns_n14={direct_restoring_final_block_joint_rank_max_patterns_n14}");
+    println!("METRIC scratch600_direct_restoring_final_block_joint_rank_support_rows_n14={direct_restoring_final_block_joint_rank_support_rows_n14}");
+    println!("METRIC scratch600_direct_restoring_final_block_joint_rank_max_blocks_n14={direct_restoring_final_block_joint_rank_max_blocks_n14}");
     println!("METRIC scratch600_direct_restoring_final_cond_mixed67_with_cond_scan_lookup_2x_mean={direct_restoring_final_cond_mixed67_with_cond_scan_lookup_2x_mean:.3}");
     println!("METRIC scratch600_direct_restoring_final_cond_mixed67_with_cond_scan_lookup_2x_gap_to_2700k={direct_restoring_final_cond_mixed67_with_cond_scan_lookup_2x_gap:.3}");
     println!("METRIC scratch600_direct_restoring_final_cond_mixed67_with_huffman_lookup_2x_mean={direct_restoring_final_cond_mixed67_with_huffman_lookup_2x_mean:.3}");
@@ -1981,6 +1993,13 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             && direct_restoring_final_cond_mixed4to8_block_joint_lookup_multiplier_budget
                 > 2.3,
         "block-joint lookup floor no longer has the expected binary-depth opening/full-scan blocker"
+    );
+    assert!(
+        direct_restoring_final_block_joint_rank_degree_n14 >= 14
+            && direct_restoring_final_block_joint_rank_density_n14 > (1usize << 14) / 4
+            && direct_restoring_final_block_joint_rank_max_patterns_n14 > 2_000
+            && direct_restoring_final_block_joint_rank_support_rows_n14 > 3_000,
+        "block-joint rank cleanup became sparse enough to revisit the direct parser decoder"
     );
     assert!(
         direct_restoring_final_block_parser_huffman_lookup_floor_mean
