@@ -27124,15 +27124,45 @@ mod tests {
         let mut pair_patterns = vec![BTreeSet::<Vec<(usize, usize)>>::new(); max_symbol_positions];
         let mut pair_individual_cost_sum = vec![0usize; max_symbol_positions];
         let mut pair_seen = vec![0usize; max_symbol_positions];
+        const LOCAL_PAIR_MAX_SPAN: usize = 7;
+        let mut local_pair_patterns =
+            vec![BTreeSet::<(u64, u64)>::new(); max_symbol_positions * (LOCAL_PAIR_MAX_SPAN + 1)];
+        let mut local_pair_individual_cost_sum =
+            vec![0usize; max_symbol_positions * (LOCAL_PAIR_MAX_SPAN + 1)];
+        let mut local_pair_seen = vec![0usize; max_symbol_positions * (LOCAL_PAIR_MAX_SPAN + 1)];
+        let local_pair_idx =
+            |pos: usize, span: usize| -> usize { pos * (LOCAL_PAIR_MAX_SPAN + 1) + span };
+        let encode_symbol =
+            |symbol: (usize, usize)| -> u64 { ((symbol.0 as u64) << 32) | symbol.1 as u64 };
         for (symbols, costs) in symbol_rows.iter().zip(cost_rows.iter()) {
             for pos in 0..symbols.len().saturating_sub(1) {
                 pair_patterns[pos].insert(vec![symbols[pos], symbols[pos + 1]]);
                 pair_individual_cost_sum[pos] += costs[pos] + costs[pos + 1];
                 pair_seen[pos] += 1;
             }
+            for pos in 0..symbols.len() {
+                for span in 1..=LOCAL_PAIR_MAX_SPAN {
+                    let other = pos + span;
+                    if other >= symbols.len() {
+                        break;
+                    }
+                    let idx = local_pair_idx(pos, span);
+                    local_pair_patterns[idx]
+                        .insert((encode_symbol(symbols[pos]), encode_symbol(symbols[other])));
+                    local_pair_individual_cost_sum[idx] += costs[pos] + costs[other];
+                    local_pair_seen[idx] += 1;
+                }
+            }
         }
 
         let mut candidates = vec![None; max_symbol_positions];
+        let mut local_pair_positive_count = 0usize;
+        let mut local_pair_support_rows = 0usize;
+        let mut local_pair_max_patterns = 0usize;
+        let mut local_pair_best_saving = 0.0f64;
+        let mut local_pair_upper_saving = 0.0f64;
+        let mut local_interval_edges =
+            vec![Vec::<(usize, f64, usize, usize)>::new(); max_symbol_positions];
         for pos in 0..max_symbol_positions {
             if pair_seen[pos] == 0 {
                 continue;
@@ -27148,6 +27178,62 @@ mod tests {
                     support_rows: patterns.saturating_sub(1),
                     patterns,
                 });
+            }
+        }
+        for pos in 0..max_symbol_positions {
+            for span in 1..=LOCAL_PAIR_MAX_SPAN {
+                let idx = local_pair_idx(pos, span);
+                if local_pair_seen[idx] == 0 {
+                    continue;
+                }
+                let patterns = local_pair_patterns[idx].len();
+                let joint_cost = model_precision_bits * ceil_log2(patterns);
+                let saved_total = local_pair_individual_cost_sum[idx]
+                    .saturating_sub(joint_cost * local_pair_seen[idx]);
+                let saving = saved_total as f64 / samples as f64;
+                if saving > 0.0 {
+                    local_pair_positive_count += 1;
+                    local_pair_support_rows += patterns.saturating_sub(1);
+                    local_pair_max_patterns = local_pair_max_patterns.max(patterns);
+                    local_pair_best_saving = local_pair_best_saving.max(saving);
+                    local_pair_upper_saving += saving;
+                    local_interval_edges[pos].push((
+                        pos + span,
+                        saving,
+                        patterns.saturating_sub(1),
+                        patterns,
+                    ));
+                }
+            }
+        }
+        let mut local_interval_dp = vec![0.0f64; max_symbol_positions + 1];
+        let mut local_interval_choice =
+            vec![None::<(usize, f64, usize, usize)>; max_symbol_positions];
+        for pos in (0..max_symbol_positions).rev() {
+            let mut best_value = local_interval_dp[pos + 1];
+            let mut best_choice = None;
+            for &(other, saving, support_rows, patterns) in &local_interval_edges[pos] {
+                let candidate = saving + local_interval_dp[other + 1];
+                if candidate > best_value {
+                    best_value = candidate;
+                    best_choice = Some((other, saving, support_rows, patterns));
+                }
+            }
+            local_interval_dp[pos] = best_value;
+            local_interval_choice[pos] = best_choice;
+        }
+        let mut local_interval_selected_pairs = 0usize;
+        let mut local_interval_support_rows = 0usize;
+        let mut local_interval_max_patterns = 0usize;
+        let mut pos = 0usize;
+        while pos < max_symbol_positions {
+            if let Some((other, _saving, support_rows, patterns)) = local_interval_choice[pos] {
+                local_interval_selected_pairs += 1;
+                local_interval_support_rows += support_rows;
+                local_interval_max_patterns = local_interval_max_patterns.max(patterns);
+                pos = other + 1;
+            } else {
+                pos += 1;
             }
         }
 
@@ -27181,6 +27267,8 @@ mod tests {
 
         let baseline_lookup_mean = mean_usize(&baseline_lookup_rows);
         let selective_pair_lookup_mean = baseline_lookup_mean - selected_saving;
+        let local_interval_pair_saving = local_interval_dp[0];
+        let local_interval_pair_lookup_mean = baseline_lookup_mean - local_interval_pair_saving;
         let oneway_parser_budget = (TARGET - STORED_BRANCH_MEAN) / 4.0;
         let schedule = [6usize, 5, 6, 8];
         let (
@@ -27196,6 +27284,9 @@ mod tests {
         let selective_pair_gap = STORED_BRANCH_MEAN
             + 4.0 * (mixed4to8_touch_mean + 2.0 * selective_pair_lookup_mean)
             - TARGET;
+        let local_interval_pair_gap = STORED_BRANCH_MEAN
+            + 4.0 * (mixed4to8_touch_mean + 2.0 * local_interval_pair_lookup_mean)
+            - TARGET;
         println!("METRIC centered_direct_restoring_final_selective_pair_lookup_baseline_mean={baseline_lookup_mean:.3}");
         println!("METRIC centered_direct_restoring_final_selective_pair_lookup_selected_saving_mean={selected_saving:.3}");
         println!("METRIC centered_direct_restoring_final_selective_pair_lookup_required_saving_mean={required_saving:.3}");
@@ -27205,6 +27296,19 @@ mod tests {
         println!("METRIC centered_direct_restoring_final_selective_pair_selected_positions={}", selected_positions.len());
         println!("METRIC centered_direct_restoring_final_selective_pair_support_rows={selected_support_rows}");
         println!("METRIC centered_direct_restoring_final_selective_pair_max_patterns={selected_max_patterns}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_max_span={LOCAL_PAIR_MAX_SPAN}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_positive_pairs={local_pair_positive_count}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_best_saving_mean={local_pair_best_saving:.3}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_upper_saving_mean={local_pair_upper_saving:.3}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_required_saving_fraction={:.6}", local_pair_upper_saving / required_saving);
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_support_rows={local_pair_support_rows}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_max_patterns={local_pair_max_patterns}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_interval_saving_mean={local_interval_pair_saving:.3}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_interval_lookup_mean={local_interval_pair_lookup_mean:.3}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_interval_gap_to_2700k={local_interval_pair_gap:.3}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_interval_selected_pairs={local_interval_selected_pairs}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_interval_support_rows={local_interval_support_rows}");
+        println!("METRIC centered_direct_restoring_final_selective_pair_local_interval_max_patterns={local_interval_max_patterns}");
         println!("METRIC centered_direct_restoring_final_selective_pair_mixed4to8_touch_mean={mixed4to8_touch_mean:.3}");
         println!("METRIC centered_direct_restoring_final_selective_pair_mixed4to8_touch_p99={mixed4to8_touch_p99}");
         println!("METRIC centered_direct_restoring_final_selective_pair_mixed4to8_compressed_p99={mixed4to8_compressed_p99}");
@@ -27226,6 +27330,14 @@ mod tests {
         assert!(
             selected_saving * 20.0 < required_saving && selective_pair_gap > 8_000.0,
             "selective adjacent-pair grouping now nearly closes the direct-centered parser lookup gap"
+        );
+        assert!(
+            local_pair_upper_saving > required_saving,
+            "local non-adjacent pair upper bound no longer opens a decoder premise"
+        );
+        assert!(
+            local_interval_pair_saving < required_saving && local_interval_pair_gap > 0.0,
+            "local interval pair grouping now closes the direct-centered parser lookup gap; build the decoder"
         );
     }
 

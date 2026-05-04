@@ -205,7 +205,7 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             name: "direct_centered_restoring_final_mixed4to8_joint_binary_floor",
             scratch_bits: 663,
             charged_toffoli: Some(2_693_369),
-            blocker: "joint block-pattern binary-depth floor would clear 2.7M by 6631 at 663 scratch, but assumes a phase-clean block-rank decoder; exact n14 rank parity is degree 14 and 8098/16384 dense, all 12 individual rank bits stay high-degree with min density 5196/16384, cheap sign/determinant xor branch recovery still misses 25324/89008 exact toy rows and det-low14 plus signs/width metadata still has 1068 collisions, selective adjacent-pair grouping saves only 26.9 of 1084.9 needed, and arbitrary full-scan support is 68058 rows and misses by 498777",
+            blocker: "joint block-pattern binary-depth floor would clear 2.7M by 6631 at 663 scratch, but assumes a phase-clean block-rank decoder; exact n14 rank parity is degree 14 and 8098/16384 dense, all 12 individual rank bits stay high-degree with min density 5196/16384, cheap sign/determinant xor branch recovery still misses 25324/89008 exact toy rows and det-low14 plus signs/width metadata still has 1068 collisions, selective adjacent-pair grouping saves only 26.9 of 1084.9 needed, local non-adjacent span7 interval pairing saves 698.1 of 1084.9 and still misses by 3094 with 5228 support rows, and arbitrary full-scan support is 68058 rows and misses by 498777",
         },
         Candidate {
             name: "direct_centered_restoring_final_mixed67_huffman_floor",
@@ -1503,6 +1503,19 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
     let direct_restoring_final_selective_pair_lookup_selected_positions = 3usize;
     let direct_restoring_final_selective_pair_lookup_support_rows = 132usize;
     let direct_restoring_final_selective_pair_lookup_max_patterns = 90usize;
+    let direct_restoring_final_selective_pair_lookup_local_max_span = 7usize;
+    let direct_restoring_final_selective_pair_lookup_local_positive_pairs = 414usize;
+    let direct_restoring_final_selective_pair_lookup_local_best_saving_mean = 26.000f64;
+    let direct_restoring_final_selective_pair_lookup_local_upper_saving_mean = 4_250.614f64;
+    let direct_restoring_final_selective_pair_lookup_local_required_saving_fraction = 3.917_857f64;
+    let direct_restoring_final_selective_pair_lookup_local_support_rows = 31_504usize;
+    let direct_restoring_final_selective_pair_lookup_local_max_patterns = 107usize;
+    let direct_restoring_final_selective_pair_lookup_local_interval_saving_mean = 698.126f64;
+    let direct_restoring_final_selective_pair_lookup_local_interval_lookup_mean = 6_097.633f64;
+    let direct_restoring_final_selective_pair_lookup_local_interval_gap = 3_094.457f64;
+    let direct_restoring_final_selective_pair_lookup_local_interval_selected_pairs = 62usize;
+    let direct_restoring_final_selective_pair_lookup_local_interval_support_rows = 5_228usize;
+    let direct_restoring_final_selective_pair_lookup_local_interval_max_patterns = 104usize;
     let direct_restoring_final_block_joint_rank_degree_n14 = 14usize;
     let direct_restoring_final_block_joint_rank_density_n14 = 8_098usize;
     let direct_restoring_final_block_joint_rank_max_rank_n14 = 2_938usize;
@@ -3036,6 +3049,19 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
     println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_selected_positions={direct_restoring_final_selective_pair_lookup_selected_positions}");
     println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_support_rows={direct_restoring_final_selective_pair_lookup_support_rows}");
     println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_max_patterns={direct_restoring_final_selective_pair_lookup_max_patterns}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_max_span={direct_restoring_final_selective_pair_lookup_local_max_span}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_positive_pairs={direct_restoring_final_selective_pair_lookup_local_positive_pairs}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_best_saving_mean={direct_restoring_final_selective_pair_lookup_local_best_saving_mean:.3}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_upper_saving_mean={direct_restoring_final_selective_pair_lookup_local_upper_saving_mean:.3}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_required_saving_fraction={direct_restoring_final_selective_pair_lookup_local_required_saving_fraction:.6}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_support_rows={direct_restoring_final_selective_pair_lookup_local_support_rows}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_max_patterns={direct_restoring_final_selective_pair_lookup_local_max_patterns}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_interval_saving_mean={direct_restoring_final_selective_pair_lookup_local_interval_saving_mean:.3}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_interval_lookup_mean={direct_restoring_final_selective_pair_lookup_local_interval_lookup_mean:.3}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_interval_gap_to_2700k={direct_restoring_final_selective_pair_lookup_local_interval_gap:.3}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_interval_selected_pairs={direct_restoring_final_selective_pair_lookup_local_interval_selected_pairs}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_interval_support_rows={direct_restoring_final_selective_pair_lookup_local_interval_support_rows}");
+    println!("METRIC scratch600_direct_restoring_final_selective_pair_lookup_local_interval_max_patterns={direct_restoring_final_selective_pair_lookup_local_interval_max_patterns}");
     println!("METRIC scratch600_direct_restoring_final_block_joint_rank_degree_n14={direct_restoring_final_block_joint_rank_degree_n14}");
     println!("METRIC scratch600_direct_restoring_final_block_joint_rank_density_n14={direct_restoring_final_block_joint_rank_density_n14}");
     println!("METRIC scratch600_direct_restoring_final_block_joint_rank_max_rank_n14={direct_restoring_final_block_joint_rank_max_rank_n14}");
@@ -4559,6 +4585,17 @@ fn scratch600_frontier_requires_selector_or_parser_breakthrough() {
             && direct_restoring_final_selective_pair_lookup_mean
                 > direct_restoring_final_selective_pair_lookup_target_mean,
         "selective adjacent-pair lookup now closes the restoring-final parser gap; revisit rank decoder"
+    );
+    assert!(
+        direct_restoring_final_selective_pair_lookup_local_upper_saving_mean
+            > 3.0 * direct_restoring_final_selective_pair_lookup_required_saving_mean
+            && direct_restoring_final_selective_pair_lookup_local_interval_saving_mean
+                < direct_restoring_final_selective_pair_lookup_required_saving_mean
+            && direct_restoring_final_selective_pair_lookup_local_interval_gap > 0.0
+            && direct_restoring_final_selective_pair_lookup_local_interval_selected_pairs
+                > direct_restoring_final_selective_pair_lookup_selected_positions
+            && direct_restoring_final_selective_pair_lookup_local_interval_support_rows > 5_000,
+        "local non-adjacent interval pairing now closes the restoring-final parser gap; build decoder"
     );
     assert!(
         direct_restoring_final_block_joint_rank_degree_n14 >= 14
