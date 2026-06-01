@@ -21,7 +21,6 @@ pub(crate) fn kaliski_iteration_bulk_prefix3(
     m_i: QubitId,
     m_future: &[QubitId],
     iter_idx: usize,
-    uv_safe_iters: usize,
     coeff: Option<(&[QubitId], &[QubitId])>,
     frame: &mut Option<QubitId>,
     is_last: bool,
@@ -29,6 +28,7 @@ pub(crate) fn kaliski_iteration_bulk_prefix3(
     // (r,s) cswap boundary-merge is only valid on the default coeff=None channel.
     let merge_rs = coeff.is_none() && kal_cswap_rs_merge_enabled();
     let merge_uv = merge_rs && kal_cswap_uv_merge_enabled();
+    let uv_safe_iters = kal_cswap_uv_merge_safe_iters();
     let uv_merge_in = merge_uv && iter_idx < uv_safe_iters;
     let uv_merge_out = merge_uv && !is_last && iter_idx + 1 < uv_safe_iters;
     let uv_frame_in = if uv_merge_in { *frame } else { None };
@@ -64,19 +64,8 @@ pub(crate) fn kaliski_iteration_bulk_prefix3(
         // u/v are conditionally exchanged by frame_in. Correct STEP-1 flags
         // to canonical basis by toggling on frame_in & (u0 xor v0).
         b.cx(v_w[0], u[0]);
-        if env_flag_enabled("KAL_UV_STEP1_FANOUT", true) {
-            let t = b.alloc_qubit();
-            b.ccx(frame_in, u[0], t);
-            b.cx(t, a_f);
-            b.cx(t, m_i);
-            let tm = b.alloc_bit();
-            b.hmr(t, tm);
-            b.cz_if(frame_in, u[0], tm);
-            b.free(t);
-        } else {
-            b.ccx(frame_in, u[0], a_f);
-            b.ccx(frame_in, u[0], m_i);
-        }
+        b.ccx(frame_in, u[0], a_f);
+        b.ccx(frame_in, u[0], m_i);
         b.cx(v_w[0], u[0]);
     }
     b.cx(a_f, b_f);
@@ -85,11 +74,12 @@ pub(crate) fn kaliski_iteration_bulk_prefix3(
     b.set_phase("kal_bulk_step2");
     // Late-iter comparator truncation: bitlen(u)+bitlen(v_w) ≤ 2n-iter_idx so
     // high bits are 0 and don't affect u > v_w.
-    let cmp_width = if iter_idx < u.len() {
+    let cmp_width = (if iter_idx < u.len() {
         u.len()
     } else {
         2 * u.len() - iter_idx
-    };
+    })
+    .min(kal_wtrunc_width(iter_idx, u.len()));
     let l_gt = b.alloc_qubit();
     with_gt(b, &u[..cmp_width], &v_w[..cmp_width], l_gt, |b| {
         if let Some(frame_in) = uv_frame_in {
@@ -184,7 +174,9 @@ pub(crate) fn kaliski_iteration_bulk_prefix3(
         // Narrow load/sub width to the late-iter bound (same formula as sub_width).
         // Before this fix: load_width = n, sub_width = max(2n-k, n) → load too wide.
         // After: load_width = sub_width = max(2n-iter_idx, n). Saves n CCX/qubits per iter.
-        let load_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+        // W-TRUNC: further narrow to the empirical bitlen envelope (min, never wider).
+        let load_width =
+            (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
         let tmp = b.alloc_qubits(n);
         for i in 0..load_width {
             b.ccx(add_f, u[i], tmp[i]);
@@ -239,9 +231,12 @@ pub(crate) fn kaliski_iteration_bulk_prefix3(
             b.hmr(tmp[i], m);
             if i < transform_width {
                 b.cz_if(add_f, r[i], m);
-            } else {
+            } else if i < load_width {
+                // W-TRUNC: bits in [transform_width, load_width) hold add_f&u.
                 b.cz_if(add_f, u[i], m);
             }
+            // W-TRUNC: bits >= load_width were never loaded (tmp[i]=0); the HMR
+            // of |0⟩ needs no phase correction.
         }
         b.free_vec(&tmp);
     }
@@ -360,7 +355,9 @@ pub(crate) fn kaliski_iteration(
     // ─── STEP 0: is_zero = (v_w == 0);  m[i] ^= (f AND is_zero);  f ^= m[i] ───
     // Truncated OR chain for late iter: v_w's bits [2n-iter..n-1] are 0
     // (Kaliski invariant), so OR only of low 2n-iter bits suffices.
-    let or_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+    // W-TRUNC: further narrow to the empirical bitlen envelope.
+    let or_width =
+        (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
     with_eq_zero_fast(b, &v_w[0..or_width], add_f, |b| {
         b.ccx(f, add_f, m_i);
     });
@@ -393,7 +390,9 @@ pub(crate) fn kaliski_iteration(
 
     // ─── STEP 2: with l = u > v_w: a ^= (f AND l AND ¬b); m_i ^= same.
     // Late-iter: u and v_w have bitlen ≤ 2n-iter, so only compare low 2n-iter bits.
-    let cmp_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+    // W-TRUNC: further narrow to the empirical bitlen envelope.
+    let cmp_width =
+        (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
     let l_gt = b.alloc_qubit();
     with_gt(b, &u[0..cmp_width], &v_w[0..cmp_width], l_gt, |b| {
         b.x(b_f); // negate polarity of b_f
@@ -470,7 +469,9 @@ pub(crate) fn kaliski_iteration(
     {
         let tmp = b.alloc_qubits(n);
         // Load tmp = add_f AND u. Late-iter bound: u[i]=0 for i >= 2n-iter.
-        let load_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+        // W-TRUNC: further narrow to the empirical bitlen envelope.
+        let load_width =
+            (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
         for i in 0..load_width {
             b.ccx(add_f, u[i], tmp[i]);
         }
@@ -685,7 +686,6 @@ pub(crate) fn kaliski_iteration_bulk_prefix3_backward(
     m_i: QubitId,
     m_future: &[QubitId],
     iter_idx: usize,
-    uv_safe_iters: usize,
     frame: &mut Option<QubitId>,
     is_last: bool,
 ) {
@@ -693,6 +693,7 @@ pub(crate) fn kaliski_iteration_bulk_prefix3_backward(
     // (r,s) cswap boundary-merge — bulk backward is always coeff=None.
     let merge_rs = kal_cswap_rs_merge_enabled();
     let merge_uv = merge_rs && kal_cswap_uv_merge_enabled();
+    let uv_safe_iters = kal_cswap_uv_merge_safe_iters();
     let uv_merge_in = merge_uv && iter_idx < uv_safe_iters;
     let uv_merge_out = merge_uv && !is_last && iter_idx + 1 < uv_safe_iters;
     let gz = gz_step4_slow();
@@ -788,7 +789,10 @@ pub(crate) fn kaliski_iteration_bulk_prefix3_backward(
         // they do not need to be transformed into add_f&u or added back into
         // v_w.  This mirrors `kaliski_iteration_backward` and saves one CCX
         // plus two CX per skipped high bit in the bulk reverse tail.
-        let transform_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+        // W-TRUNC: must match forward load_width exactly (this undoes the
+        // forward `v_w -= u` over load_width) → same min envelope.
+        let transform_width =
+            (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
         for i in 0..transform_width {
             b.cx(r[i], u[i]);
         }
@@ -801,7 +805,9 @@ pub(crate) fn kaliski_iteration_bulk_prefix3_backward(
         // After transforming tmp from r to u, high bits of tmp above the
         // late-iter denominator width are known zero.  Truncate the reverse
         // add into v_w just like the generic backward iteration does.
-        let add_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+        // W-TRUNC: same envelope as transform_width / forward load_width.
+        let add_width =
+            (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
         let tmp_add_slice: Vec<QubitId> = tmp[0..add_width].to_vec();
         let v_w_slice: Vec<QubitId> = v_w[0..add_width].to_vec();
         if gz {
@@ -868,7 +874,9 @@ pub(crate) fn kaliski_iteration_bulk_prefix3_backward(
     // Reverse STEP 2.
     b.set_phase("bk_bulk_step2");
     // Mirror forward bulk STEP2 comparator truncation.
-    let cmp_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+    // W-TRUNC: same envelope as forward bulk STEP2 cmp_width.
+    let cmp_width =
+        (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
     let l_gt = b.alloc_qubit();
     with_gt(b, &u[..cmp_width], &v_w[..cmp_width], l_gt, |b| {
         if let Some(frame_out) = uv_frame_out {
@@ -898,19 +906,8 @@ pub(crate) fn kaliski_iteration_bulk_prefix3_backward(
     b.cx(a_f, b_f);
     if let Some(frame_out) = uv_frame_out {
         b.cx(v_w[0], u[0]);
-        if env_flag_enabled("KAL_UV_STEP1_FANOUT", true) {
-            let t = b.alloc_qubit();
-            b.ccx(frame_out, u[0], t);
-            b.cx(t, m_i);
-            b.cx(t, a_f);
-            let tm = b.alloc_bit();
-            b.hmr(t, tm);
-            b.cz_if(frame_out, u[0], tm);
-            b.free(t);
-        } else {
-            b.ccx(frame_out, u[0], m_i);
-            b.ccx(frame_out, u[0], a_f);
-        }
+        b.ccx(frame_out, u[0], m_i);
+        b.ccx(frame_out, u[0], a_f);
         b.cx(v_w[0], u[0]);
     }
     b.x(v_w[0]);
@@ -1035,7 +1032,9 @@ pub(crate) fn kaliski_iteration_backward(
         // Late-iter: u high bits 0, so transform at those bits: cx(r,u=0)→u=r,
         //   ccx(add_f, u=r, tmp) flips tmp. tmp goes 0 → add_f AND r. Not what we
         //   want (need add_f AND u=0). For late iter, truncate transform to uv_width.
-        let transform_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+        // W-TRUNC: must match forward load_width exactly (undoes `v_w -= u`).
+        let transform_width =
+            (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
         for i in 0..transform_width {
             b.cx(r[i], u[i]);
         }
@@ -1112,7 +1111,9 @@ pub(crate) fn kaliski_iteration_backward(
 
     b.set_phase("bk_step2");
     // Reverse STEP 2 (with_gt body is self-inverse) ──────────────────
-    let cmp_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+    // W-TRUNC: same envelope as forward generic STEP2 cmp_width.
+    let cmp_width =
+        (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
     let l_gt = b.alloc_qubit();
     with_gt(b, &u[0..cmp_width], &v_w[0..cmp_width], l_gt, |b| {
         b.x(b_f);
@@ -1159,9 +1160,11 @@ pub(crate) fn kaliski_iteration_backward(
     b.set_phase("bk_step0_eqzero");
     // Reverse STEP 0 (with measurement uncompute of OR chain) ────────
     // Truncated for late iter: only low 2n-iter bits of v_w are possibly nonzero.
+    // W-TRUNC: same envelope as forward generic STEP0 or_width.
     b.cx(m_i, f);
     {
-        let or_width = if iter_idx < n { n } else { 2 * n - iter_idx };
+        let or_width =
+            (if iter_idx < n { n } else { 2 * n - iter_idx }).min(kal_wtrunc_width(iter_idx, n));
         let nv = or_width;
         if nv == 1 {
             b.x(v_w[0]);
