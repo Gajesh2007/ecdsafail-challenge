@@ -23163,7 +23163,8 @@ fn dialog_gcd_cmod_add_materialized_pseudomersenne(
     b.set_phase("dialog_gcd_materialized_special_overflow_clean");
     if dialog_gcd_raw_apply_truncated_clean_enabled() {
         let compare_start = N - dialog_gcd_apply_clean_compare_bits();
-        cmp_lt_into(b, &acc[compare_start..], &f[compare_start..], acc_ovf);
+        // Measured comparator (peak-safe: add carries already freed).
+        cmp_lt_into_fast(b, &acc[compare_start..], &f[compare_start..], acc_ovf);
     } else {
         cmp_lt_into(b, acc, &f, acc_ovf);
     }
@@ -23228,14 +23229,14 @@ fn dialog_gcd_cmod_sub_materialized_pseudomersenne(
         for &q in &a[compare_start..] {
             b.x(q);
         }
-        cmp_lt_into(
+        cmp_lt_into_fast(
             b,
             &acc[compare_start..],
             &a[compare_start..],
             underflow_pred,
         );
         b.ccx(ctrl, underflow_pred, acc_ovf);
-        cmp_lt_into(
+        cmp_lt_into_fast(
             b,
             &acc[compare_start..],
             &a[compare_start..],
@@ -23390,14 +23391,14 @@ fn dialog_gcd_cmod_sub_materialized_pseudomersenne_borrowed_subtrahend(
         for &q in &a[compare_start..] {
             b.x(q);
         }
-        cmp_lt_into(
+        cmp_lt_into_fast(
             b,
             &acc[compare_start..],
             &a[compare_start..],
             underflow_pred,
         );
         b.ccx(ctrl, underflow_pred, acc_ovf);
-        cmp_lt_into(
+        cmp_lt_into_fast(
             b,
             &acc[compare_start..],
             &a[compare_start..],
@@ -28027,7 +28028,9 @@ fn configure_ecdsafail_submission_route() {
     // co-tune the Fiat-Shamir reroll (1 -> 5) to land a clean 9024-shot island.
     // Pure Toffoli reduction (1981734 -> 1952382), peak-neutral at 1698.
     // (Validated 0/0/0 over 9024 via eval_circuit.)
-    set_default_env("DIALOG_REROLL", "5");
+    // Apply-phase clean compares also use the measured comparator
+    // (cmp_lt_into_fast); op stream changes, reroll=4 lands a clean island.
+    set_default_env("DIALOG_REROLL", "4");
     // Fuse the branch-bit comparator with the b0-controlled log update: derive
     // b0_and_b1 from the in-flight comparator carry instead of materializing a
     // separate cmp qubit and recomputing the comparator for uncompute. Pure
