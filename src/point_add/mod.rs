@@ -29258,7 +29258,10 @@ fn configure_ecdsafail_submission_route() {
     // Branch comparator width tightened 63 -> 61 (−1,160 executed Toffoli),
     // STACKED on the PA9024 margin-5 cut. Two within-budget truncations coexist
     // via the 2-D reroll island (DIALOG_REROLL=1, DIALOG_POST_SUB_REROLL=0).
-    set_default_env("DIALOG_GCD_COMPARE_BITS", "61");
+    // Branch comparator width tightened 61 -> 59 (−1,600 executed Toffoli),
+    // stacked on the chunked-apply + round763 + acc=19 base via the 2-D reroll
+    // island (DIALOG_REROLL=0, DIALOG_POST_SUB_REROLL=10). Validated 0/0/0 @ 1567.
+    set_default_env("DIALOG_GCD_COMPARE_BITS", "59");
     set_default_env("DIALOG_GCD_APPLY_CLEAN_COMPARE_BITS", "19");
     set_default_env("DIALOG_GCD_RAW_PA", "1");
     set_default_env("DIALOG_GCD_ACTIVE_ITERATIONS", "399");
@@ -29301,8 +29304,8 @@ fn configure_ecdsafail_submission_route() {
     // Round763 reachable-support compressor + apply-clean compare bits 19 on
     // the chunked apply route needs a fresh Fiat-Shamir island: 6/28 validates
     // 0/0/0 over 9024 at 1567q and 1,685,515 avg executed Toffoli.
-    set_default_env("DIALOG_REROLL", "6");
-    set_default_env("DIALOG_POST_SUB_REROLL", "28");
+    set_default_env("DIALOG_REROLL", "0");
+    set_default_env("DIALOG_POST_SUB_REROLL", "10");
     // Fuse the branch-bit comparator with the b0-controlled log update: derive
     // b0_and_b1 from the in-flight comparator carry instead of materializing a
     // separate cmp qubit and recomputing the comparator for uncompute. Pure
