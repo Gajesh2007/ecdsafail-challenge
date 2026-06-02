@@ -55,13 +55,15 @@ pub(crate) fn shift22_spill_carrytail() -> bool {
 }
 
 /// Carry-tail cut width for the shift22 STEP-2 spill ops: `22 + W` where W is
-/// `SHIFT22_SPILL_W` (default 41).  Single value, used identically in every
-/// forward spill op and its reversal (phase-parity law).
+/// `SHIFT22_SPILL_W` (default 33).  Single value, used identically in every
+/// forward spill op and its reversal (phase-parity law).  W=33 is the deepest
+/// clean island (W∈{30,31,32,34} reject); tightens the sparse-spill carry tail
+/// vs the prior W=41, saving Toffoli (2,403,434 → 2,402,954, 9024-clean, peak 2309).
 pub(crate) fn shift22_spill_carrytail_cut() -> usize {
     let w = std::env::var("SHIFT22_SPILL_W")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(41);
+        .unwrap_or(33);
     22usize.saturating_add(w)
 }
 
