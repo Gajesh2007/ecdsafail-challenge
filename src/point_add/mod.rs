@@ -5659,6 +5659,75 @@ fn schoolbook_square_symmetric_inverse(b: &mut B, x: &[QubitId], tmp_ext: &[Qubi
     }
 }
 
+fn schoolbook_square_symmetric_row0_windowed(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
+    let n = x.len();
+    debug_assert_eq!(tmp_ext.len(), 2 * n);
+    for i in 0..n {
+        let width = if i == n - 1 { 1 } else { n - i + 1 };
+        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
+        let row = b.alloc_qubits(width);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
+        }
+        let pad = b.alloc_qubit();
+        let mut row_padded = row.clone();
+        row_padded.push(pad);
+        let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        if i == 0 {
+            cuccaro_add_fast_windowed(b, &row_padded, &slice, c_in, 2);
+        } else {
+            cuccaro_add_fast(b, &row_padded, &slice, c_in);
+        }
+        b.free(c_in);
+        b.free(pad);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            let m = b.alloc_bit();
+            b.hmr(row[k + 2], m);
+            b.cz_if(x[i], x[i + 1 + k], m);
+        }
+        b.free_vec(&row);
+    }
+}
+
+fn schoolbook_square_symmetric_row0_windowed_inverse(
+    b: &mut B,
+    x: &[QubitId],
+    tmp_ext: &[QubitId],
+) {
+    let n = x.len();
+    for i in (0..n).rev() {
+        let width = if i == n - 1 { 1 } else { n - i + 1 };
+        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
+        let row = b.alloc_qubits(width);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
+        }
+        let pad = b.alloc_qubit();
+        let mut row_padded = row.clone();
+        row_padded.push(pad);
+        let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        if i == 0 {
+            cuccaro_sub_fast_windowed(b, &row_padded, &slice, c_in, 2);
+        } else {
+            cuccaro_sub_fast(b, &row_padded, &slice, c_in);
+        }
+        b.free(c_in);
+        b.free(pad);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            let m = b.alloc_bit();
+            b.hmr(row[k + 2], m);
+            b.cz_if(x[i], x[i + 1 + k], m);
+        }
+        b.free_vec(&row);
+    }
+}
+
 fn schoolbook_square_symmetric_nohmr(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
     let n = x.len();
     debug_assert_eq!(tmp_ext.len(), 2 * n);
@@ -6088,6 +6157,9 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
     // peak. Free it for that window; re-grab a fresh zero before z1 += z2 restores
     // (lo+hi)^2 for the inverse uncompute. Bennett-clean (free zero, alloc zero).
     let free_z1_top = std::env::var("KARA_FREE_Z1_TOPBIT").ok().as_deref() == Some("1");
+    let free_z1_low = std::env::var("KARA_FREE_Z1_LOBIT").ok().as_deref() == Some("1");
+    let z02_row0_windowed =
+        std::env::var("KARA_Z02_ROW0_WINDOWED").ok().as_deref() == Some("1");
 
     // ── Forward z1 = (lo+hi)^2 FIRST (tmp_ext not yet allocated → low peak). ──
     {
@@ -6105,11 +6177,19 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
     // z0 = lo^2 → tmp_ext[0..2h], z2 = hi^2 → tmp_ext[2h..4h].
     {
         let slice: Vec<QubitId> = tmp_ext[0..2 * h].to_vec();
-        schoolbook_square_symmetric(b, &x_lo, &slice);
+        if z02_row0_windowed {
+            schoolbook_square_symmetric_row0_windowed(b, &x_lo, &slice);
+        } else {
+            schoolbook_square_symmetric(b, &x_lo, &slice);
+        }
     }
     {
         let slice: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
-        schoolbook_square_symmetric(b, &x_hi, &slice);
+        if z02_row0_windowed {
+            schoolbook_square_symmetric_row0_windowed(b, &x_hi, &slice);
+        } else {
+            schoolbook_square_symmetric(b, &x_hi, &slice);
+        }
     }
 
     // Combine: z1 -= z0; z1 -= z2; mid (tmp_ext[h..4h]) += z1. Non-fast Cuccaro
@@ -6140,6 +6220,10 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
         let acc_slice: Vec<QubitId> = tmp_ext[h..4 * h].to_vec();
         add_nbit_qq(b, &z1_ext, &acc_slice);
         b.free_vec(&pad);
+    }
+    if free_z1_low {
+        let low = z1_reg.remove(0);
+        b.free(low);
     }
 
     // ── Solinas reduction: acc -= (lo + hi·c) mod p. ──
@@ -6249,6 +6333,10 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
 
     // ── Inverse combine: mid -= z1; z1 += z2; z1 += z0. ──
     b.set_phase("r84k_inv_combine");
+    if free_z1_low {
+        let low = b.alloc_qubit();
+        z1_reg.insert(0, low);
+    }
     {
         let pad = b.alloc_qubits(3 * h - z1_reg.len());
         let mut z1_ext: Vec<QubitId> = z1_reg.to_vec();
@@ -6281,11 +6369,19 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
     b.set_phase("r84k_z_inv_squares");
     {
         let slice: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
-        schoolbook_square_symmetric_inverse(b, &x_hi, &slice);
+        if z02_row0_windowed {
+            schoolbook_square_symmetric_row0_windowed_inverse(b, &x_hi, &slice);
+        } else {
+            schoolbook_square_symmetric_inverse(b, &x_hi, &slice);
+        }
     }
     {
         let slice: Vec<QubitId> = tmp_ext[0..2 * h].to_vec();
-        schoolbook_square_symmetric_inverse(b, &x_lo, &slice);
+        if z02_row0_windowed {
+            schoolbook_square_symmetric_row0_windowed_inverse(b, &x_lo, &slice);
+        } else {
+            schoolbook_square_symmetric_inverse(b, &x_lo, &slice);
+        }
     }
     b.free_vec(&tmp_ext);
 
@@ -29351,6 +29447,12 @@ fn configure_ecdsafail_submission_route() {
     // MARGIN stays 5 — no give-back. Validated 0/0/0 over 9024 at the prior cb59
     // point: 1542q x 1,682,159 T = 2,593,889,178.
     set_default_env("KARA_FREE_Z1_TOPBIT", "1");
+    // Round84 1541q stack: window row 0 of each z0/z2 half-square so the
+    // square/inverse-square peaks drop below Solinas, and release z1_reg[0]
+    // while z1_reg = 2*lo*hi (even) so the Solinas sub/midsub peak drops 1q.
+    // With F_CUT=79 below this lands at 1541q x 1,682,265 T.
+    set_default_env("KARA_Z02_ROW0_WINDOWED", "1");
+    set_default_env("KARA_FREE_Z1_LOBIT", "1");
     // W-TRUNC tightening: GCD-body width envelope margin. Re-scanned for the
     // Karatsuba x-tail op stream: margin=27 + REROLL=0 lands a clean 9024-shot
     // island (anupsv's margin=26/REROLL=20 was for the schoolbook stream).
@@ -29376,21 +29478,16 @@ fn configure_ecdsafail_submission_route() {
     // 1567 -> 1543. Costs +~6,384 avg-executed Toffoli (see F_CUT below).
     set_default_env("ROUND84_XTAIL_BORROW_CARRIES", "1");
     // Chunked apply materializes ctrl&a only for the active carry window, so the
-    // apply phase drops under the ROUND84 peak binder. After the ROUND84 square
-    // dropped to 1543, the apply raw sum/difference phases (block 1 = [F_CUT,257),
-    // f + carry lane) became the 1558 binder. The chunked sub/add is EXACT
-    // regardless of F_CUT (full cuccaro + exact [..F_CUT] boundary clear), so
-    // widening the first cut 70 -> 78 rebalances the blocks (block 1 narrows to
-    // 257-78) and drops the apply phase to 1543 == the ROUND84 floor. Global peak
-    // 1558 -> 1543. F_CUT only reseeds + grows the boundary comparator (+~6,384
-    // avg-executed Toffoli, 1,688,703 -> 1,695,087); peak-neutral for any cut>=78.
+    // apply phase drops under the ROUND84 peak binder. With the row0/lowbit
+    // 1541q round84 cut above, F_CUT=79 is the cheapest tested cut that keeps
+    // the apply raw sum/difference phases below the new floor (1540).
     set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_BLOCKS", "2");
-    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "78");
-    // The cb58 + top-bit-free + fast-doubling op stream re-rolls the island.
-    // 2-D (DIALOG_REROLL x DIALOG_POST_SUB_REROLL) search lands 14/4 clean 0/0/0
-    // over 9024 at 1542q and 1,681,207 avg executed Toffoli.
-    set_default_env("DIALOG_REROLL", "14");
-    set_default_env("DIALOG_POST_SUB_REROLL", "4");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "79");
+    // The 1541q row0/lowbit/F_CUT79 op stream re-rolls the cb58 island.
+    // Randomized 2-D search lands 23/11 clean 0/0/0 over 9024 at
+    // 1541q and 1,682,265 avg executed Toffoli.
+    set_default_env("DIALOG_REROLL", "23");
+    set_default_env("DIALOG_POST_SUB_REROLL", "11");
     // Fuse the branch-bit comparator with the b0-controlled log update: derive
     // b0_and_b1 from the in-flight comparator carry instead of materializing a
     // separate cmp qubit and recomputing the comparator for uncompute. Pure
