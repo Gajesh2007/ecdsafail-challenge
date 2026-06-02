@@ -29023,7 +29023,10 @@ fn configure_ecdsafail_submission_route() {
     set_default_env("KAL_FOLD_CARRY_TRUNC_W", "20");
     set_default_env("DIALOG_GCD_ROUND763_DEDUP", "1");
     set_default_env("DIALOG_GCD_MEASURED_UNDERFLOW_GATE", "1");
-    set_default_env("DIALOG_GCD_COMPARE_BITS", "63");
+    // Branch comparator width tightened 63 -> 61 (−1,160 executed Toffoli),
+    // STACKED on the PA9024 margin-5 cut. Two within-budget truncations coexist
+    // via the 2-D reroll island (DIALOG_REROLL=1, DIALOG_POST_SUB_REROLL=0).
+    set_default_env("DIALOG_GCD_COMPARE_BITS", "61");
     set_default_env("DIALOG_GCD_APPLY_CLEAN_COMPARE_BITS", "20");
     set_default_env("DIALOG_GCD_RAW_PA", "1");
     set_default_env("DIALOG_GCD_ACTIVE_ITERATIONS", "399");
@@ -29060,8 +29063,8 @@ fn configure_ecdsafail_submission_route() {
     set_default_env("DIALOG_GCD_APPLY_WINDOW_BLOCKS", "2");
     // New low-bit body op stream needs its own clean Fiat-Shamir island:
     // REROLL=1, POST_SUB_REROLL=12 validates 0/0/0 over 9024.
-    set_default_env("DIALOG_REROLL", "3");
-    set_default_env("DIALOG_POST_SUB_REROLL", "18");
+    set_default_env("DIALOG_REROLL", "1");
+    set_default_env("DIALOG_POST_SUB_REROLL", "0");
     // Fuse the branch-bit comparator with the b0-controlled log update: derive
     // b0_and_b1 from the in-flight comparator carry instead of materializing a
     // separate cmp qubit and recomputing the comparator for uncompute. Pure
