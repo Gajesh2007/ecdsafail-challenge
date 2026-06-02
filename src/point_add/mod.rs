@@ -1414,6 +1414,144 @@ fn mod_sub_qq_fast(b: &mut B, acc: &[QubitId], a: &[QubitId], p: U256) {
     let _ = (acc_ext, a_ext);
 }
 
+/// Low-peak `acc := (acc + a) mod p`. Identical structure to `mod_add_qq` but
+/// the two Solinas-constant corrections (`+c`, conditional `-c`) are vented onto
+/// the operand `a_ext` as dirty scratch (2 clean qubits) instead of a fresh
+/// n-qubit loaded-constant register. The main add and the flag-uncompute compare
+/// stay ancilla-free (Cuccaro / cmp_lt_into), so the only transient is +2 clean.
+/// Used inside the round84 Solinas reduction where the materialized `load_const`
+/// coexisting with tmp_ext + z1_reg was the peak binder. `c = 2^256 - p` fits in
+/// 64 bits, so `c_low` carries the whole constant.
+fn mod_add_qq_vent(b: &mut B, acc: &[QubitId], a: &[QubitId], p: U256) {
+    let n = acc.len();
+    assert_eq!(n, a.len());
+    debug_assert_eq!(n, 256);
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+    let (a_ext, a_ovf) = ext_reg(b, a);
+
+    add_nbit_qq(b, &a_ext, &acc_ext);
+
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1));
+    let c_low = c.as_limbs()[0];
+    let n1 = acc_ext.len();
+    {
+        let q_clean2: [QubitId; 2] = [b.alloc_qubit(), b.alloc_qubit()];
+        venting::iadd_dirty_2clean_classical(
+            b,
+            &acc_ext,
+            &a_ext[..n1 - 2],
+            &q_clean2,
+            c_low,
+            false,
+        );
+        b.free(q_clean2[0]);
+        b.free(q_clean2[1]);
+    }
+
+    let flag = b.alloc_qubit();
+    b.cx(acc_ovf, flag);
+
+    b.x(flag);
+    {
+        let q_clean2: [QubitId; 2] = [b.alloc_qubit(), b.alloc_qubit()];
+        venting::cisub_dirty_2clean_classical(
+            b,
+            &acc_ext,
+            &a_ext[..n1 - 2],
+            &q_clean2,
+            c_low,
+            flag,
+        );
+        b.free(q_clean2[0]);
+        b.free(q_clean2[1]);
+    }
+    b.x(flag);
+
+    b.cx(flag, acc_ovf);
+
+    cmp_lt_into(b, &acc_ext[..n], &a_ext[..n], flag);
+    b.free(flag);
+
+    unext_reg(b, a_ovf);
+    unext_reg(b, acc_ovf);
+    let _ = (acc_ext, a_ext);
+}
+
+/// `acc := (acc - a) mod p`, low-peak. Explicit gate-reverse of
+/// `mod_add_qq_vent` (the venting protocols use measurement, so `emit_inverse`
+/// cannot reverse them; each venting step is undone by its matched dual:
+/// iadd↔isub, cisub↔ciadd). The flag-uncompute is `cmp_lt_into` (self-inverse,
+/// no materialized neg), so no n-wide const register is ever live.
+fn mod_sub_qq_vent(b: &mut B, acc: &[QubitId], a: &[QubitId], p: U256) {
+    let n = acc.len();
+    assert_eq!(n, a.len());
+    debug_assert_eq!(n, 256);
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+    let (a_ext, a_ovf) = ext_reg(b, a);
+
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1));
+    let c_low = c.as_limbs()[0];
+    let n1 = acc_ext.len();
+
+    // Reverse of forward step 6: cmp_lt_into is its own inverse (XOR into flag).
+    let flag = b.alloc_qubit();
+    cmp_lt_into(b, &acc_ext[..n], &a_ext[..n], flag);
+
+    // Reverse of step 5.
+    b.cx(flag, acc_ovf);
+
+    // Reverse of step 4: forward applied (cisub c) under !flag; undo with ciadd.
+    b.x(flag);
+    {
+        let q_clean2: [QubitId; 2] = [b.alloc_qubit(), b.alloc_qubit()];
+        venting::ciadd_dirty_2clean_classical(
+            b,
+            &acc_ext,
+            &a_ext[..n1 - 2],
+            &q_clean2,
+            c_low,
+            flag,
+            false,
+        );
+        b.free(q_clean2[0]);
+        b.free(q_clean2[1]);
+    }
+    b.x(flag);
+
+    // Reverse of step 3.
+    b.cx(acc_ovf, flag);
+    b.free(flag);
+
+    // Reverse of step 2: undo the unconditional (iadd c) with a cisub under an
+    // always-on control.
+    {
+        let one = b.alloc_qubit();
+        b.x(one);
+        let q_clean2: [QubitId; 2] = [b.alloc_qubit(), b.alloc_qubit()];
+        venting::cisub_dirty_2clean_classical(
+            b,
+            &acc_ext,
+            &a_ext[..n1 - 2],
+            &q_clean2,
+            c_low,
+            one,
+        );
+        b.free(q_clean2[0]);
+        b.free(q_clean2[1]);
+        b.x(one);
+        b.free(one);
+    }
+
+    // Reverse of step 1.
+    sub_nbit_qq(b, &a_ext, &acc_ext);
+
+    unext_reg(b, a_ovf);
+    unext_reg(b, acc_ovf);
+    let _ = (acc_ext, a_ext);
+}
+
 /// Fast mod_neg using measurement-based Cuccaro for the addition.
 fn mod_neg_inplace_fast(b: &mut B, v: &[QubitId], p: U256) {
     for &q in v {
@@ -5769,6 +5907,73 @@ fn schoolbook_square_symmetric_lowq_inverse(b: &mut B, x: &[QubitId], tmp_ext: &
     }
 }
 
+/// Like `schoolbook_square_symmetric` (fast, measurement UMA) but the per-row
+/// Cuccaro carry lane is hosted on a caller-supplied clean register `host`
+/// (returned clean) instead of a fresh allocation. Toffoli-identical to the
+/// fast square, peak-identical to the lowq square — used for the z0 lobe of the
+/// round84 Karatsuba square, where the not-yet-written z2 slice is clean scratch.
+fn schoolbook_square_symmetric_hosted(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId], host: &[QubitId]) {
+    let n = x.len();
+    debug_assert_eq!(tmp_ext.len(), 2 * n);
+    for i in 0..n {
+        let width = if i == n - 1 { 1 } else { n - i + 1 };
+        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
+        let row = b.alloc_qubits(width);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
+        }
+        let pad = b.alloc_qubit();
+        let mut row_padded = row.clone();
+        row_padded.push(pad);
+        let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        cuccaro_add_fast_borrowed_carries(b, &row_padded, &slice, c_in, &host[..row_padded.len() - 1]);
+        b.free(c_in);
+        b.free(pad);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            let m = b.alloc_bit();
+            b.hmr(row[k + 2], m);
+            b.cz_if(x[i], x[i + 1 + k], m);
+        }
+        b.free_vec(&row);
+    }
+}
+
+fn schoolbook_square_symmetric_hosted_inverse(
+    b: &mut B,
+    x: &[QubitId],
+    tmp_ext: &[QubitId],
+    host: &[QubitId],
+) {
+    let n = x.len();
+    for i in (0..n).rev() {
+        let width = if i == n - 1 { 1 } else { n - i + 1 };
+        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
+        let row = b.alloc_qubits(width);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
+        }
+        let pad = b.alloc_qubit();
+        let mut row_padded = row.clone();
+        row_padded.push(pad);
+        let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        cuccaro_sub_fast_borrowed_carries(b, &row_padded, &slice, c_in, &host[..row_padded.len() - 1]);
+        b.free(c_in);
+        b.free(pad);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            let m = b.alloc_bit();
+            b.hmr(row[k + 2], m);
+            b.cz_if(x[i], x[i + 1 + k], m);
+        }
+        b.free_vec(&row);
+    }
+}
+
 /// Schoolbook squarer with Bennett uncompute. For squaring `tmp_ext = x*x`
 /// (2n bits, no mod reduction), then ADD with Solinas reduction to acc,
 /// then uncompute tmp_ext via gate-level inverse.
@@ -6088,6 +6293,12 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
     // peak. Free it for that window; re-grab a fresh zero before z1 += z2 restores
     // (lo+hi)^2 for the inverse uncompute. Bennett-clean (free zero, alloc zero).
     let free_z1_top = std::env::var("KARA_FREE_Z1_TOPBIT").ok().as_deref() == Some("1");
+    // The z0=lo^2 / z2=hi^2 squares coexist with tmp_ext(2n)+z1_reg, and the
+    // _fast symmetric square allocates a ~(h)-wide cuccaro carry lane on top of
+    // its ~(h)-wide row — that lane is the round84 peak binder. The ancilla-free
+    // _lowq square drops the carry lane (peak −~h) at a higher Toffoli cost.
+    // z1=(lo+hi)^2 is computed before tmp_ext (low peak), so it stays _fast.
+    let z02_lowq = std::env::var("KARA_Z02_LOWQ").ok().as_deref() == Some("1");
 
     // ── Forward z1 = (lo+hi)^2 FIRST (tmp_ext not yet allocated → low peak). ──
     {
@@ -6105,11 +6316,22 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
     // z0 = lo^2 → tmp_ext[0..2h], z2 = hi^2 → tmp_ext[2h..4h].
     {
         let slice: Vec<QubitId> = tmp_ext[0..2 * h].to_vec();
-        schoolbook_square_symmetric(b, &x_lo, &slice);
+        if z02_lowq {
+            // z2 slice (tmp_ext[2h..4h]) is still clean here → host z0's fast
+            // carry there (Toffoli-free peak drop) instead of paying lowq.
+            let host: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
+            schoolbook_square_symmetric_hosted(b, &x_lo, &slice, &host);
+        } else {
+            schoolbook_square_symmetric(b, &x_lo, &slice);
+        }
     }
     {
         let slice: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
-        schoolbook_square_symmetric(b, &x_hi, &slice);
+        if z02_lowq {
+            schoolbook_square_symmetric_lowq(b, &x_hi, &slice);
+        } else {
+            schoolbook_square_symmetric(b, &x_hi, &slice);
+        }
     }
 
     // Combine: z1 -= z0; z1 -= z2; mid (tmp_ext[h..4h]) += z1. Non-fast Cuccaro
@@ -6158,15 +6380,24 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
     let shift_fast = std::env::var("KARA_SOL_SHIFT_FAST").ok().as_deref() == Some("1");
     let lo: Vec<QubitId> = tmp_ext[0..n].to_vec();
     let hi: Vec<QubitId> = tmp_ext[n..2 * n].to_vec();
+    // The non-fast mod_add/sub materialize a 256-q load_const for the Solinas
+    // `c` correction, which coexists with tmp_ext + z1_reg and binds the phase
+    // peak. The vent form hosts that correction on the operand `a_ext` (dirty,
+    // value-preserved) for 2 clean qubits, dropping the transient ~n.
+    let mod_vent = std::env::var("KARA_SOL_MOD_VENT").ok().as_deref() == Some("1");
     let mod_sub = |b: &mut B, acc: &[QubitId], a: &[QubitId]| {
-        if mod_fast {
+        if mod_vent {
+            mod_sub_qq_vent(b, acc, a, p);
+        } else if mod_fast {
             mod_sub_qq_fast(b, acc, a, p);
         } else {
             mod_sub_qq(b, acc, a, p);
         }
     };
     let mod_add = |b: &mut B, acc: &[QubitId], a: &[QubitId]| {
-        if mod_fast {
+        if mod_vent {
+            mod_add_qq_vent(b, acc, a, p);
+        } else if mod_fast {
             mod_add_qq_fast(b, acc, a, p);
         } else {
             mod_add_qq(b, acc, a, p);
@@ -6221,7 +6452,7 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
             mod_dbl(b, &hi);
         }
         b.set_phase("r84k_sol_midsub");
-        mod_sub_qq(b, acc, &hi, p);
+        mod_sub(b, acc, &hi);
         b.set_phase("r84k_sol_hlv22");
         for _ in 0..22 {
             mod_hlv(b, &hi);
@@ -6234,7 +6465,7 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
             mod_shift_left_by_k_lowq(b, &hi, p, 22)
         };
         b.set_phase("r84k_sol_midsub");
-        mod_sub_qq(b, acc, &hi, p);
+        mod_sub(b, acc, &hi);
         b.set_phase("r84k_sol_shiftR");
         if shift_fast {
             mod_shift_right_by_k(b, &hi, p, 22, spill, flag_inv, ovf);
@@ -6281,11 +6512,22 @@ fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[QubitId], p:
     b.set_phase("r84k_z_inv_squares");
     {
         let slice: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
-        schoolbook_square_symmetric_inverse(b, &x_hi, &slice);
+        if z02_lowq {
+            schoolbook_square_symmetric_lowq_inverse(b, &x_hi, &slice);
+        } else {
+            schoolbook_square_symmetric_inverse(b, &x_hi, &slice);
+        }
     }
     {
         let slice: Vec<QubitId> = tmp_ext[0..2 * h].to_vec();
-        schoolbook_square_symmetric_inverse(b, &x_lo, &slice);
+        if z02_lowq {
+            // z2 slice was just uncomputed above → clean again, host inv-z0's
+            // borrow there (mirror of the forward z0 hosting).
+            let host: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
+            schoolbook_square_symmetric_hosted_inverse(b, &x_lo, &slice, &host);
+        } else {
+            schoolbook_square_symmetric_inverse(b, &x_lo, &slice);
+        }
     }
     b.free_vec(&tmp_ext);
 
@@ -29310,11 +29552,7 @@ fn configure_ecdsafail_submission_route() {
     // Branch comparator width tightened 61 -> 59 (−1,600 executed Toffoli),
     // stacked on the chunked-apply + round763 + acc=19 base via the 2-D reroll
     // island (DIALOG_REROLL=0, DIALOG_POST_SUB_REROLL=10). Validated 0/0/0 @ 1567.
-    // Comparator width 59 -> 58 trims another comparator bit on the current
-    // 1542q top-bit-free route. Comparator width 58 -> 57 trims one more bit;
-    // the cb57 op stream re-rolls the Fiat-Shamir island, and REROLL=6/POST_SUB=12
-    // below validates 0/0/0 over 9024 at 1542q x 1,680,191 T = 2,590,854,522.
-    set_default_env("DIALOG_GCD_COMPARE_BITS", "57");
+    set_default_env("DIALOG_GCD_COMPARE_BITS", "59");
     set_default_env("DIALOG_GCD_APPLY_CLEAN_COMPARE_BITS", "19");
     set_default_env("DIALOG_GCD_RAW_PA", "1");
     set_default_env("DIALOG_GCD_ACTIVE_ITERATIONS", "399");
@@ -29347,9 +29585,9 @@ fn configure_ecdsafail_submission_route() {
     // Solinas-reduction peak window (z1_reg == 2*lo*hi < 2^257 there), so that
     // qubit is freed for the window and re-grabbed (fresh zero) before the inverse
     // combine restores z1=(lo+hi)^2. Bennett-clean, 0 added Toffoli. Stacks on
-    // KARA_SOL_DBL_FAST. The cb57 update below re-rolls the combined island again;
-    // MARGIN stays 5 — no give-back. Validated 0/0/0 over 9024 at the prior cb59
-    // point: 1542q x 1,682,159 T = 2,593,889,178.
+    // KARA_SOL_DBL_FAST; the combined op stream re-rolls the island, re-tuned to
+    // REROLL=17/POST_SUB=56 below (MARGIN stays 5 — no give-back). Validated 0/0/0
+    // over 9024: 1542q x 1,682,159 T = 2,593,889,178.
     set_default_env("KARA_FREE_Z1_TOPBIT", "1");
     // W-TRUNC tightening: GCD-body width envelope margin. Re-scanned for the
     // Karatsuba x-tail op stream: margin=27 + REROLL=0 lands a clean 9024-shot
@@ -29385,12 +29623,27 @@ fn configure_ecdsafail_submission_route() {
     // 1558 -> 1543. F_CUT only reseeds + grows the boundary comparator (+~6,384
     // avg-executed Toffoli, 1,688,703 -> 1,695,087); peak-neutral for any cut>=78.
     set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_BLOCKS", "2");
-    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "78");
-    // The cb57 + top-bit-free + fast-doubling op stream re-rolls the island.
-    // 2-D (DIALOG_REROLL x DIALOG_POST_SUB_REROLL) search lands 6/12 clean 0/0/0
-    // over 9024 at 1542q and 1,680,191 avg executed Toffoli.
-    set_default_env("DIALOG_REROLL", "6");
-    set_default_env("DIALOG_POST_SUB_REROLL", "12");
+    // PEAK-QUBIT CUT 1542 -> 1500 (-42q). Two co-binders dropped together:
+    //  (1) ROUND84 Karatsuba square (z0=lo^2 / z2=hi^2 schoolbook squares parked a
+    //      ~130-wide cuccaro_add_fast carry lane, and the Solinas mid_sub/sub_add's
+    //      mod_add_qq/mod_sub_qq materialized a load_const(256) correction transient).
+    //      Fix: KARA_Z02_LOWQ hosts the z0 square's carry lane on the (clean) z2
+    //      slice via cuccaro_add_fast_borrowed_carries and runs z2 ancilla-free
+    //      (lowq); KARA_SOL_MOD_VENT vents the constant corrections onto the dirty
+    //      operand (+2 clean) instead of load_const. Both are value-exact.
+    //  (2) GCD apply materialized_special raw sum/difference: the [F_CUT,257) block's
+    //      f + carry lane pinned 1542. The chunked sub/add is EXACT for any cut, so
+    //      widening F_CUT 78 -> 99 narrows block 1 and drops the apply phase to 1500.
+    // Global peak 1542 -> 1500; cost +~36,558 avg-executed Toffoli (1,682,159 ->
+    // 1,718,717) for -42q: 1500 x 1,718,717 = 2,578,075,500.
+    set_default_env("KARA_Z02_LOWQ", "1");
+    set_default_env("KARA_SOL_MOD_VENT", "1");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "99");
+    // The lowq/hosted/vented squares + F_CUT=99 op-stream re-rolls the Fiat-Shamir
+    // island. 2-D (DIALOG_REROLL x DIALOG_POST_SUB_REROLL) search lands 15/25 clean
+    // 0/0/0 over 9024 at 1500q and 1,718,717 avg executed Toffoli.
+    set_default_env("DIALOG_REROLL", "15");
+    set_default_env("DIALOG_POST_SUB_REROLL", "25");
     // Fuse the branch-bit comparator with the b0-controlled log update: derive
     // b0_and_b1 from the in-flight comparator carry instead of materializing a
     // separate cmp qubit and recomputing the comparator for uncompute. Pure
