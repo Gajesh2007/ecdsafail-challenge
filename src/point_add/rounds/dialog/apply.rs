@@ -26,6 +26,20 @@ pub(crate) fn dialog_gcd_apply_chunked_f_cut2() -> Option<usize> {
         .filter(|&cut| (1..N).contains(&cut))
 }
 
+pub(crate) fn dialog_gcd_apply_chunked_f_cut3() -> Option<usize> {
+    std::env::var("DIALOG_GCD_APPLY_CHUNKED_F_CUT3")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&cut| (1..N).contains(&cut))
+}
+
+pub(crate) fn dialog_gcd_apply_chunked_f_custom4_enabled() -> bool {
+    std::env::var("DIALOG_GCD_APPLY_CHUNKED_F_CUSTOM4")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
 pub(crate) fn dialog_gcd_apply_chunked_f_reuse_cin_zero_enabled() -> bool {
     std::env::var("DIALOG_GCD_APPLY_CHUNKED_F_REUSE_CIN_ZERO")
         .ok()
@@ -629,6 +643,20 @@ pub(crate) fn dialog_gcd_clear_controlled_slice_hmr(
 }
 
 pub(crate) fn dialog_gcd_chunk_hi(blocks: usize, block: usize, ext_n: usize) -> usize {
+    if blocks == 4 && dialog_gcd_apply_chunked_f_custom4_enabled() {
+        let cuts = [
+            dialog_gcd_apply_chunked_f_cut().unwrap_or(ext_n / 4),
+            dialog_gcd_apply_chunked_f_cut2().unwrap_or(ext_n / 2),
+            dialog_gcd_apply_chunked_f_cut3().unwrap_or(3 * ext_n / 4),
+        ];
+        assert!(
+            cuts[0] < cuts[1] && cuts[1] < cuts[2] && cuts[2] < ext_n,
+            "custom four-chunk apply boundaries must be strictly increasing and below {ext_n}: {cuts:?}"
+        );
+        if block < cuts.len() {
+            return cuts[block];
+        }
+    }
     if block == 0 && blocks <= 3 {
         return dialog_gcd_apply_chunked_f_cut().unwrap_or(ext_n / 2).min(ext_n - 1);
     }

@@ -206,15 +206,25 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_block_lifecyc
             let v_active = &v[..active_width];
             let compare_bits = dialog_gcd_compare_bits_for_step(step, active_width);
 
-            let borrowed_carries = dialog_gcd_pick_runway_safe_borrow_slice(
-                dialog_gcd_compressed_sidecar_future_carry_slice(
-                    compressed_log,
-                    step,
-                    active_width,
-                ),
-                u,
+            let future = dialog_gcd_compressed_sidecar_future_carry_slice(
                 compressed_log,
+                step,
                 active_width,
+            );
+            let composite_scratch = dialog_gcd_composite_scratch_enabled().then(|| {
+                dialog_gcd_build_composite_scratch(
+                    b,
+                    future,
+                    u,
+                    v,
+                    compressed_log,
+                    raw_block,
+                    active_width,
+                )
+            });
+            let borrowed_carries = composite_scratch.as_ref().map_or_else(
+                || dialog_gcd_pick_runway_safe_borrow_slice(future, u, compressed_log, active_width),
+                |scratch| Some(scratch.lanes.as_slice()),
             );
 
             b.set_phase("dialog_gcd_compressed_block_tobitvector_branch_bits");
@@ -271,6 +281,9 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_block_lifecyc
 
             b.set_phase("dialog_gcd_compressed_block_tobitvector_shift");
             dialog_gcd_shift_right_assuming_even(b, v_active);
+            if let Some(scratch) = composite_scratch {
+                b.free_vec(&scratch.owned);
+            }
         }
 
         b.set_phase("dialog_gcd_compressed_block_tobitvector_compress_block");
@@ -356,15 +369,25 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_reverse_block
             dialog_gcd_unshift_right_assuming_even(b, v_active);
 
             b.set_phase("dialog_gcd_compressed_block_tobitvector_reverse_add");
-            let borrowed_carries = dialog_gcd_pick_runway_safe_borrow_slice(
-                dialog_gcd_compressed_sidecar_future_carry_slice(
-                    compressed_log,
-                    step,
-                    active_width,
-                ),
-                u,
+            let future = dialog_gcd_compressed_sidecar_future_carry_slice(
                 compressed_log,
+                step,
                 active_width,
+            );
+            let composite_scratch = dialog_gcd_composite_scratch_enabled().then(|| {
+                dialog_gcd_build_composite_scratch(
+                    b,
+                    future,
+                    u,
+                    v,
+                    compressed_log,
+                    raw_block,
+                    active_width,
+                )
+            });
+            let borrowed_carries = composite_scratch.as_ref().map_or_else(
+                || dialog_gcd_pick_runway_safe_borrow_slice(future, u, compressed_log, active_width),
+                |scratch| Some(scratch.lanes.as_slice()),
             );
             dialog_gcd_controlled_add_selected(b, u_active, v_active, b0, borrowed_carries);
 
@@ -412,6 +435,9 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_reverse_block
                 b.free(cmp);
             }
             b.cx(v[0], b0);
+            if let Some(scratch) = composite_scratch {
+                b.free_vec(&scratch.owned);
+            }
         }
         if !owned_raw_block.is_empty() {
             b.free_vec(&owned_raw_block);
@@ -1524,4 +1550,55 @@ pub(crate) fn dialog_gcd_runway_safe_future_prefix<'a>(
             &slice[..safe]
         })
         .filter(|slice| !slice.is_empty())
+}
+
+pub(crate) fn dialog_gcd_composite_scratch_enabled() -> bool {
+    std::env::var("DIALOG_GCD_COMPOSITE_SCRATCH")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+pub(crate) struct DialogGcdCompositeScratch {
+    lanes: Vec<QubitId>,
+    owned: Vec<QubitId>,
+}
+
+pub(crate) fn dialog_gcd_build_composite_scratch(
+    b: &mut B,
+    future: Option<&[QubitId]>,
+    u: &[QubitId],
+    v: &[QubitId],
+    compressed_log: &[QubitId],
+    raw_block: &[QubitId],
+    active_width: usize,
+) -> DialogGcdCompositeScratch {
+    let want = 2 * active_width - 1;
+    let mut lanes = Vec::with_capacity(want);
+    let mut push = |q: QubitId| {
+        if lanes.len() < want
+            && !lanes.contains(&q)
+            && !raw_block.contains(&q)
+            && !u[..active_width].contains(&q)
+            && !v[..active_width].contains(&q)
+        {
+            lanes.push(q);
+        }
+    };
+    if let Some(future) = dialog_gcd_runway_safe_future_prefix(future, u, active_width) {
+        for &q in future {
+            push(q);
+        }
+    }
+    for &q in &v[active_width..] {
+        push(q);
+    }
+    for &q in &u[active_width..] {
+        if !compressed_log.contains(&q) {
+            push(q);
+        }
+    }
+    let owned = b.alloc_qubits(want - lanes.len());
+    lanes.extend_from_slice(&owned);
+    DialogGcdCompositeScratch { lanes, owned }
 }

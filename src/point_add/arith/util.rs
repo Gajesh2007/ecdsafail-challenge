@@ -255,7 +255,8 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     set_default_env("DIALOG_GCD_COMPRESSED_BLOCK_LIFECYCLE", "1");
     set_default_env("DIALOG_GCD_HOST_REVERSE_RAW_BLOCK", "1");
     set_default_env("DIALOG_GCD_COMPRESSED_LOG_U_HIGH_RUNWAY", "1");
-    set_default_env("DIALOG_GCD_COMPRESSED_LOG_U_HIGH_RUNWAY_BLOCKS", "4");
+    set_default_env("DIALOG_GCD_COMPRESSED_LOG_U_HIGH_RUNWAY_BLOCKS", "999");
+    set_default_env("DIALOG_GCD_COMPOSITE_SCRATCH", "1");
     set_default_env("DIALOG_GCD_APPLY_REPLAY_SWAP_HOST", "1");
     set_default_env("SQUARE_SELFHOST_SAFE_LANE_REUSE", "1");
     set_default_env("SQUARE_SELFHOST_GATE_SUFFIX_CARRIES", "1");
@@ -314,7 +315,7 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     // different op count re-rolls the Fiat-Shamir island, co-tuned below
     // (WIDTH_MARGIN=27, REROLL=0). Validated 0/0/0 over 9024.
     // ROUND84_XTAIL_KARATSUBA=0 (+ROUND84_XTAIL_SCHOOLBOOK=1) restores schoolbook.
-    set_default_env("ROUND84_XTAIL_KARATSUBA", "1");
+    set_default_env("ROUND84_XTAIL_KARATSUBA", "0");
     // Slack-exploit: once round84's Solinas binder fell to 1543 (== the apply
     // tier), its doubling lanes (r84k_sol_dbl22/halve, peak 1538) sit 5q BELOW
     // the binder. Switching them to the fast (carry-ancilla) doubling is free at
@@ -369,7 +370,8 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     // 257-78) and drops the apply phase to 1543 == the ROUND84 floor. Global peak
     // 1558 -> 1543. F_CUT only reseeds + grows the boundary comparator (+~6,384
     // avg-executed Toffoli, 1,688,703 -> 1,695,087); peak-neutral for any cut>=78.
-    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_BLOCKS", "3");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_BLOCKS", "4");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUSTOM4", "1");
     // PEAK-QUBIT CUT 1542 -> 1500 (-42q). Two co-binders dropped together:
     //  (1) ROUND84 Karatsuba square (z0=lo^2 / z2=hi^2 schoolbook squares parked a
     //      ~130-wide cuccaro_add_fast carry lane, and the Solinas mid_sub/sub_add's
@@ -426,13 +428,15 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     // 399 T/qubit, far inside break-even. Score 1446 x 1,740,263 = 2,516,420,298.
     set_default_env("DIALOG_GCD_BODY_HOST_CIN", "1");
     set_default_env("DIALOG_GCD_LATE_BORROW_UV_HIGH", "1");
-    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "116");
-    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT2", "140");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "56");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT2", "112");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT3", "168");
     // Active-396 island: compare_bits=58 + apply_clean=21 + schedule margin=8
     // validates 0/0/0 over all 9024 shots at 1438q x 1,736,773 T.
-    // compare56 clean island (1-D reroll sweep on the 1411q base, post_sub=0).
-    set_default_env("DIALOG_REROLL", "444");
-    set_default_env("DIALOG_POST_SUB_REROLL", "0");
+    // 1355q COMPOSITE_SCRATCH base (62c8115) + compare56 refinement (9fad60c):
+    // clean island from a fixed-base-comb + Montgomery-batch reroll search.
+    set_default_env("DIALOG_REROLL", "291150");
+    set_default_env("DIALOG_POST_SUB_REROLL", "503292");
     // Fuse the branch-bit comparator with the b0-controlled log update: derive
     // b0_and_b1 from the in-flight comparator carry instead of materializing a
     // separate cmp qubit and recomputing the comparator for uncompute. Pure
