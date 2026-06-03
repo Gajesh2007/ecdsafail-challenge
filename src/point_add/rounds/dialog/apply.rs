@@ -563,62 +563,8 @@ pub(crate) fn dialog_gcd_cmod_add_materialized_pseudomersenne(
     ctrl: QubitId,
     p: U256,
 ) {
-    assert_eq!(acc.len(), N);
-    assert_eq!(a.len(), N);
-    if let Some(blocks) = dialog_gcd_apply_chunked_f_blocks()
-        .filter(|_| dialog_gcd_raw_apply_truncated_clean_enabled())
-    {
-        dialog_gcd_cmod_add_materialized_pseudomersenne_chunked(b, acc, a, ctrl, p, blocks);
-        return;
-    }
-    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
-
-    let f = b.alloc_qubits(N);
-    b.set_phase("dialog_gcd_materialized_special_load_addend");
-    for i in 0..N {
-        b.ccx(ctrl, a[i], f[i]);
-    }
-
-    let (acc_ext, acc_ovf) = ext_reg(b, acc);
-    let c_in = b.alloc_qubit();
-
-    b.set_phase("dialog_gcd_materialized_special_raw_sum");
-    if let Some(w) = dialog_gcd_apply_window_blocks() {
-        cuccaro_add_fast_windowed_low_to_ext(b, &f, &acc_ext, c_in, w);
-    } else {
-        let f_ovf = b.alloc_qubit();
-        let mut f_ext = f.clone();
-        f_ext.push(f_ovf);
-        cuccaro_add_fast(b, &f_ext, &acc_ext, c_in);
-        b.free(f_ovf);
-    }
-    b.free(c_in);
-
-    b.set_phase("dialog_gcd_materialized_special_overflow_fold");
-    if let Some(w) = fold_carry_trunc_window() {
-        cadd_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
-    } else {
-        cadd_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
-    }
-
-    b.set_phase("dialog_gcd_materialized_special_overflow_clean");
-    if dialog_gcd_raw_apply_truncated_clean_enabled() {
-        let compare_start = N - dialog_gcd_apply_clean_compare_bits();
-        cmp_lt_into_fast(b, &acc[compare_start..], &f[compare_start..], acc_ovf);
-    } else {
-        cmp_lt_into(b, acc, &f, acc_ovf);
-    }
-    unext_reg(b, acc_ovf);
-
-    b.set_phase("dialog_gcd_materialized_special_clear_addend");
-    for i in 0..N {
-        let m = b.alloc_bit();
-        b.hmr(f[i], m);
-        b.cz_if(ctrl, a[i], m);
-    }
-    b.free_vec(&f);
+    dialog_gcd_cmod_add_materialized_pseudomersenne_with_clean_scratch(b, acc, a, ctrl, p, &[]);
 }
-
 pub(crate) fn dialog_gcd_measured_apply_sub_enabled() -> bool {
     std::env::var("DIALOG_GCD_MEASURED_APPLY_SUB")
         .ok()
@@ -703,14 +649,28 @@ pub(crate) fn dialog_gcd_add_ctrl_chunked_low_to_ext(
     ctrl: QubitId,
     c_in: QubitId,
     blocks: usize,
+    clean_scratch: &[QubitId],
 ) {
     let n = source.len();
     assert_eq!(acc_ext.len(), n + 1);
+    for (i, &q) in clean_scratch.iter().enumerate() {
+        assert!(!clean_scratch[..i].contains(&q));
+        assert!(!source.contains(&q));
+        assert!(!acc_ext.contains(&q));
+        assert_ne!(q, ctrl);
+        assert_ne!(q, c_in);
+    }
     let ext_n = acc_ext.len();
     let blocks = blocks.max(2).min(ext_n);
     let mut carry = c_in;
     let mut lo = 0usize;
-    let mut couts: Vec<(QubitId, usize)> = Vec::new();
+    // Reserve the first borrowed cell as the transient high-zero lane.  It is
+    // restored after every chunk and may be reused if REUSE_CIN_ZERO=0.  The
+    // remaining cells can hold dirty boundary carries until the exact
+    // cumulative comparator sweep clears them.
+    let zero_host = clean_scratch.first().copied();
+    let boundary_hosts = &clean_scratch[usize::from(zero_host.is_some())..];
+    let mut couts: Vec<(QubitId, usize, bool)> = Vec::new();
 
     for blk in 0..blocks {
         let hi = dialog_gcd_chunk_hi(blocks, blk, ext_n);
@@ -727,48 +687,57 @@ pub(crate) fn dialog_gcd_add_ctrl_chunked_low_to_ext(
 
         assert!(hi <= n);
         let f = dialog_gcd_load_controlled_slice(b, ctrl, source, lo, hi);
-        let owned_zero = if carry == c_in || !dialog_gcd_apply_chunked_f_reuse_cin_zero_enabled() {
-            Some(b.alloc_qubit())
+        let needs_distinct_zero =
+            carry == c_in || !dialog_gcd_apply_chunked_f_reuse_cin_zero_enabled();
+        let (zero, owned_zero) = if needs_distinct_zero {
+            zero_host.map_or_else(|| (b.alloc_qubit(), true), |q| (q, false))
         } else {
-            None
+            (c_in, false)
         };
-        let zero = owned_zero.unwrap_or(c_in);
-        let cout = b.alloc_qubit();
+        let (cout, owned_cout) = boundary_hosts
+            .get(couts.len())
+            .copied()
+            .map_or_else(|| (b.alloc_qubit(), true), |q| (q, false));
         let mut a_block = f.clone();
         a_block.push(zero);
         let mut acc_block = acc_ext[lo..hi].to_vec();
         acc_block.push(cout);
         cuccaro_add_fast(b, &a_block, &acc_block, carry);
-        if let Some(zero) = owned_zero {
+        if owned_zero {
             b.free(zero);
         }
         dialog_gcd_clear_controlled_slice_hmr(b, ctrl, source, lo, &f);
         b.free_vec(&f);
-        couts.push((cout, hi));
+        couts.push((cout, hi, owned_cout));
         carry = cout;
         lo = hi;
     }
 
     if dialog_gcd_apply_chunked_f_fuse_boundary_clears_enabled() {
-        if let Some(&(_, p)) = couts.last() {
+        if let Some(&(_, p, _)) = couts.last() {
+            let targets = couts
+                .iter()
+                .map(|&(cout, p, _)| (cout, p))
+                .collect::<Vec<_>>();
             ccx_cmp_lt_into_fast_prefix_targets(
                 b,
                 &acc_ext[..p],
                 &source[..p],
                 ctrl,
-                &couts,
+                &targets,
             );
         }
     } else {
-        for &(cout, p) in couts.iter().rev() {
+        for &(cout, p, _) in couts.iter().rev() {
             ccx_cmp_lt_into_fast(b, &acc_ext[..p], &source[..p], ctrl, cout);
         }
     }
-    for &(cout, _) in couts.iter().rev() {
-        b.free(cout);
+    for &(cout, _, owned_cout) in couts.iter().rev() {
+        if owned_cout {
+            b.free(cout);
+        }
     }
 }
-
 pub(crate) fn dialog_gcd_sub_ctrl_chunked_low_to_ext(
     b: &mut B,
     source: &[QubitId],
@@ -776,14 +745,26 @@ pub(crate) fn dialog_gcd_sub_ctrl_chunked_low_to_ext(
     ctrl: QubitId,
     c_in: QubitId,
     blocks: usize,
+    clean_scratch: &[QubitId],
 ) {
     let n = source.len();
     assert_eq!(acc_ext.len(), n + 1);
+    for (i, &q) in clean_scratch.iter().enumerate() {
+        assert!(!clean_scratch[..i].contains(&q));
+        assert!(!source.contains(&q));
+        assert!(!acc_ext.contains(&q));
+        assert_ne!(q, ctrl);
+        assert_ne!(q, c_in);
+    }
     let ext_n = acc_ext.len();
     let blocks = blocks.max(2).min(ext_n);
     let mut borrow = c_in;
     let mut lo = 0usize;
-    let mut bouts: Vec<(QubitId, usize)> = Vec::new();
+    // Symmetric to the add path: reserve one clean transient high-zero host and
+    // retain borrowed boundary-borrow cells until their comparator clear.
+    let zero_host = clean_scratch.first().copied();
+    let boundary_hosts = &clean_scratch[usize::from(zero_host.is_some())..];
+    let mut bouts: Vec<(QubitId, usize, bool)> = Vec::new();
 
     for blk in 0..blocks {
         let hi = dialog_gcd_chunk_hi(blocks, blk, ext_n);
@@ -800,46 +781,54 @@ pub(crate) fn dialog_gcd_sub_ctrl_chunked_low_to_ext(
 
         assert!(hi <= n);
         let f = dialog_gcd_load_controlled_slice(b, ctrl, source, lo, hi);
-        let owned_zero = if borrow == c_in || !dialog_gcd_apply_chunked_f_reuse_cin_zero_enabled() {
-            Some(b.alloc_qubit())
+        let needs_distinct_zero =
+            borrow == c_in || !dialog_gcd_apply_chunked_f_reuse_cin_zero_enabled();
+        let (zero, owned_zero) = if needs_distinct_zero {
+            zero_host.map_or_else(|| (b.alloc_qubit(), true), |q| (q, false))
         } else {
-            None
+            (c_in, false)
         };
-        let zero = owned_zero.unwrap_or(c_in);
-        let bout = b.alloc_qubit();
+        let (bout, owned_bout) = boundary_hosts
+            .get(bouts.len())
+            .copied()
+            .map_or_else(|| (b.alloc_qubit(), true), |q| (q, false));
         let mut a_block = f.clone();
         a_block.push(zero);
         let mut acc_block = acc_ext[lo..hi].to_vec();
         acc_block.push(bout);
         cuccaro_sub_fast(b, &a_block, &acc_block, borrow);
-        if let Some(zero) = owned_zero {
+        if owned_zero {
             b.free(zero);
         }
         dialog_gcd_clear_controlled_slice_hmr(b, ctrl, source, lo, &f);
         b.free_vec(&f);
-        bouts.push((bout, hi));
+        bouts.push((bout, hi, owned_bout));
         borrow = bout;
         lo = hi;
     }
 
     if dialog_gcd_apply_chunked_f_fuse_boundary_clears_enabled() {
-        if let Some(&(_, p)) = bouts.last() {
+        if let Some(&(_, p, _)) = bouts.last() {
             for i in 0..p {
                 b.x(source[i]);
             }
+            let targets = bouts
+                .iter()
+                .map(|&(bout, p, _)| (bout, p))
+                .collect::<Vec<_>>();
             ccx_cmp_lt_into_fast_prefix_targets(
                 b,
                 &source[..p],
                 &acc_ext[..p],
                 ctrl,
-                &bouts,
+                &targets,
             );
             for i in 0..p {
                 b.x(source[i]);
             }
         }
     } else {
-        for &(bout, p) in bouts.iter().rev() {
+        for &(bout, p, _) in bouts.iter().rev() {
             for i in 0..p {
                 b.x(source[i]);
             }
@@ -849,11 +838,12 @@ pub(crate) fn dialog_gcd_sub_ctrl_chunked_low_to_ext(
             }
         }
     }
-    for &(bout, _) in bouts.iter().rev() {
-        b.free(bout);
+    for &(bout, _, owned_bout) in bouts.iter().rev() {
+        if owned_bout {
+            b.free(bout);
+        }
     }
 }
-
 pub(crate) fn dialog_gcd_cmod_add_materialized_pseudomersenne_chunked(
     b: &mut B,
     acc: &[QubitId],
@@ -861,17 +851,29 @@ pub(crate) fn dialog_gcd_cmod_add_materialized_pseudomersenne_chunked(
     ctrl: QubitId,
     p: U256,
     blocks: usize,
+    clean_scratch: &[QubitId],
 ) {
     assert_eq!(acc.len(), N);
     assert_eq!(a.len(), N);
     let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
 
     let (acc_ext, acc_ovf) = ext_reg(b, acc);
-    let c_in = b.alloc_qubit();
+    for (i, &q) in clean_scratch.iter().enumerate() {
+        assert!(!clean_scratch[..i].contains(&q));
+        assert!(!acc_ext.contains(&q));
+        assert!(!a.contains(&q));
+        assert_ne!(q, ctrl);
+    }
+    let (c_in, owned_c_in, inner_scratch) = clean_scratch.split_first().map_or_else(
+        || (b.alloc_qubit(), true, &[][..]),
+        |(&q, rest)| (q, false, rest),
+    );
 
     b.set_phase("dialog_gcd_materialized_special_chunked_raw_sum");
-    dialog_gcd_add_ctrl_chunked_low_to_ext(b, a, &acc_ext, ctrl, c_in, blocks);
-    b.free(c_in);
+    dialog_gcd_add_ctrl_chunked_low_to_ext(b, a, &acc_ext, ctrl, c_in, blocks, inner_scratch);
+    if owned_c_in {
+        b.free(c_in);
+    }
 
     b.set_phase("dialog_gcd_materialized_special_overflow_fold");
     if let Some(w) = fold_carry_trunc_window() {
@@ -885,7 +887,6 @@ pub(crate) fn dialog_gcd_cmod_add_materialized_pseudomersenne_chunked(
     ccx_cmp_lt_into_fast(b, &acc[compare_start..], &a[compare_start..], ctrl, acc_ovf);
     unext_reg(b, acc_ovf);
 }
-
 pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_chunked(
     b: &mut B,
     acc: &[QubitId],
@@ -893,17 +894,29 @@ pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_chunked(
     ctrl: QubitId,
     p: U256,
     blocks: usize,
+    clean_scratch: &[QubitId],
 ) {
     assert_eq!(acc.len(), N);
     assert_eq!(a.len(), N);
     let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
 
     let (acc_ext, acc_ovf) = ext_reg(b, acc);
-    let c_in = b.alloc_qubit();
+    for (i, &q) in clean_scratch.iter().enumerate() {
+        assert!(!clean_scratch[..i].contains(&q));
+        assert!(!acc_ext.contains(&q));
+        assert!(!a.contains(&q));
+        assert_ne!(q, ctrl);
+    }
+    let (c_in, owned_c_in, inner_scratch) = clean_scratch.split_first().map_or_else(
+        || (b.alloc_qubit(), true, &[][..]),
+        |(&q, rest)| (q, false, rest),
+    );
 
     b.set_phase("dialog_gcd_materialized_special_chunked_raw_difference");
-    dialog_gcd_sub_ctrl_chunked_low_to_ext(b, a, &acc_ext, ctrl, c_in, blocks);
-    b.free(c_in);
+    dialog_gcd_sub_ctrl_chunked_low_to_ext(b, a, &acc_ext, ctrl, c_in, blocks, inner_scratch);
+    if owned_c_in {
+        b.free(c_in);
+    }
 
     b.set_phase("dialog_gcd_materialized_special_underflow_fold");
     if let Some(w) = fold_carry_trunc_window() {
@@ -916,7 +929,6 @@ pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_chunked(
     dialog_gcd_clean_truncated_underflow(b, acc, a, ctrl, acc_ovf);
     unext_reg(b, acc_ovf);
 }
-
 pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne(
     b: &mut B,
     acc: &[QubitId],
@@ -924,13 +936,155 @@ pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne(
     ctrl: QubitId,
     p: U256,
 ) {
+    dialog_gcd_cmod_sub_materialized_pseudomersenne_with_clean_scratch(b, acc, a, ctrl, p, &[]);
+}
+pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_borrowed_subtrahend(
+    b: &mut B,
+    acc: &[QubitId],
+    a: &[QubitId],
+    ctrl: QubitId,
+    p: U256,
+    f: &[QubitId],
+) {
+    assert_eq!(acc.len(), N);
+    assert_eq!(a.len(), N);
+    assert_eq!(f.len(), N);
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_load_subtrahend");
+    for i in 0..N {
+        b.ccx(ctrl, a[i], f[i]);
+    }
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+    let f_ovf = b.alloc_qubit();
+    let mut f_ext = f.to_vec();
+    f_ext.push(f_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_raw_difference");
+    sub_nbit_qq(b, &f_ext, &acc_ext);
+    b.free(f_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_underflow_fold");
+    if let Some(w) = fold_carry_trunc_window() {
+        csub_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
+    } else {
+        csub_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
+    }
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_underflow_clean");
+    if dialog_gcd_raw_apply_truncated_clean_enabled() {
+        dialog_gcd_clean_truncated_underflow(b, acc, a, ctrl, acc_ovf);
+    } else {
+        b.x(acc_ovf);
+        mod_neg_inplace_fast(b, f, p);
+        cmp_lt_into_fast(b, acc, f, acc_ovf);
+        mod_neg_inplace_fast(b, f, p);
+    }
+    unext_reg(b, acc_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_clear_subtrahend");
+    for i in (0..N).rev() {
+        b.ccx(ctrl, a[i], f[i]);
+    }
+}
+
+
+pub(crate) fn dialog_gcd_cmod_add_materialized_pseudomersenne_with_clean_scratch(
+    b: &mut B,
+    acc: &[QubitId],
+    a: &[QubitId],
+    ctrl: QubitId,
+    p: U256,
+    clean_scratch: &[QubitId],
+) {
+    assert_eq!(acc.len(), N);
+    assert_eq!(a.len(), N);
+    if let Some(blocks) = dialog_gcd_apply_chunked_f_blocks()
+        .filter(|_| dialog_gcd_raw_apply_truncated_clean_enabled())
+    {
+        dialog_gcd_cmod_add_materialized_pseudomersenne_chunked(
+            b,
+            acc,
+            a,
+            ctrl,
+            p,
+            blocks,
+            clean_scratch,
+        );
+        return;
+    }
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
+
+    let f = b.alloc_qubits(N);
+    b.set_phase("dialog_gcd_materialized_special_load_addend");
+    for i in 0..N {
+        b.ccx(ctrl, a[i], f[i]);
+    }
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+    let c_in = b.alloc_qubit();
+
+    b.set_phase("dialog_gcd_materialized_special_raw_sum");
+    if let Some(w) = dialog_gcd_apply_window_blocks() {
+        cuccaro_add_fast_windowed_low_to_ext(b, &f, &acc_ext, c_in, w);
+    } else {
+        let f_ovf = b.alloc_qubit();
+        let mut f_ext = f.clone();
+        f_ext.push(f_ovf);
+        cuccaro_add_fast(b, &f_ext, &acc_ext, c_in);
+        b.free(f_ovf);
+    }
+    b.free(c_in);
+
+    b.set_phase("dialog_gcd_materialized_special_overflow_fold");
+    if let Some(w) = fold_carry_trunc_window() {
+        cadd_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
+    } else {
+        cadd_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
+    }
+
+    b.set_phase("dialog_gcd_materialized_special_overflow_clean");
+    if dialog_gcd_raw_apply_truncated_clean_enabled() {
+        let compare_start = N - dialog_gcd_apply_clean_compare_bits();
+        cmp_lt_into_fast(b, &acc[compare_start..], &f[compare_start..], acc_ovf);
+    } else {
+        cmp_lt_into(b, acc, &f, acc_ovf);
+    }
+    unext_reg(b, acc_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_clear_addend");
+    for i in 0..N {
+        let m = b.alloc_bit();
+        b.hmr(f[i], m);
+        b.cz_if(ctrl, a[i], m);
+    }
+    b.free_vec(&f);
+}
+
+pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_with_clean_scratch(
+    b: &mut B,
+    acc: &[QubitId],
+    a: &[QubitId],
+    ctrl: QubitId,
+    p: U256,
+    clean_scratch: &[QubitId],
+) {
     assert_eq!(acc.len(), N);
     assert_eq!(a.len(), N);
     if let Some(blocks) = dialog_gcd_apply_chunked_f_blocks()
         .filter(|_| dialog_gcd_raw_apply_truncated_clean_enabled())
         .filter(|_| dialog_gcd_measured_apply_sub_enabled())
     {
-        dialog_gcd_cmod_sub_materialized_pseudomersenne_chunked(b, acc, a, ctrl, p, blocks);
+        dialog_gcd_cmod_sub_materialized_pseudomersenne_chunked(
+            b,
+            acc,
+            a,
+            ctrl,
+            p,
+            blocks,
+            clean_scratch,
+        );
         return;
     }
     let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
@@ -992,55 +1146,4 @@ pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne(
         b.cz_if(ctrl, a[i], m);
     }
     b.free_vec(&f);
-}
-
-pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_borrowed_subtrahend(
-    b: &mut B,
-    acc: &[QubitId],
-    a: &[QubitId],
-    ctrl: QubitId,
-    p: U256,
-    f: &[QubitId],
-) {
-    assert_eq!(acc.len(), N);
-    assert_eq!(a.len(), N);
-    assert_eq!(f.len(), N);
-    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
-
-    b.set_phase("dialog_gcd_materialized_special_borrowed_load_subtrahend");
-    for i in 0..N {
-        b.ccx(ctrl, a[i], f[i]);
-    }
-
-    let (acc_ext, acc_ovf) = ext_reg(b, acc);
-    let f_ovf = b.alloc_qubit();
-    let mut f_ext = f.to_vec();
-    f_ext.push(f_ovf);
-
-    b.set_phase("dialog_gcd_materialized_special_borrowed_raw_difference");
-    sub_nbit_qq(b, &f_ext, &acc_ext);
-    b.free(f_ovf);
-
-    b.set_phase("dialog_gcd_materialized_special_borrowed_underflow_fold");
-    if let Some(w) = fold_carry_trunc_window() {
-        csub_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
-    } else {
-        csub_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
-    }
-
-    b.set_phase("dialog_gcd_materialized_special_borrowed_underflow_clean");
-    if dialog_gcd_raw_apply_truncated_clean_enabled() {
-        dialog_gcd_clean_truncated_underflow(b, acc, a, ctrl, acc_ovf);
-    } else {
-        b.x(acc_ovf);
-        mod_neg_inplace_fast(b, f, p);
-        cmp_lt_into_fast(b, acc, f, acc_ovf);
-        mod_neg_inplace_fast(b, f, p);
-    }
-    unext_reg(b, acc_ovf);
-
-    b.set_phase("dialog_gcd_materialized_special_borrowed_clear_subtrahend");
-    for i in (0..N).rev() {
-        b.ccx(ctrl, a[i], f[i]);
-    }
 }

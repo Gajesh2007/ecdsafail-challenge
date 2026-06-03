@@ -53,17 +53,30 @@ pub(crate) fn dialog_gcd_reverse_raw_block_host<'a>(
     let active_width = dialog_gcd_tobitvector_active_width(start);
     let want = 2 * active_width - 1;
     if u.len().saturating_sub(active_width) >= want + 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE {
-        return Some(&u[u.len() - 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE..]);
+        let candidate = &u[u.len() - 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE..];
+        if !dialog_gcd_compressed_log_u_high_runway_enabled()
+            || !dialog_gcd_slice_intersects(candidate, compressed_log)
+        {
+            return Some(candidate);
+        }
     }
     let future_start = (block + 1) * DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS;
     let future = compressed_log.get(future_start..)?;
-    if future.len() >= want + 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE {
-        Some(&future[future.len() - 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE..])
-    } else {
-        None
+    let raw_bits = 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE;
+    if future.len() < want + raw_bits {
+        return None;
     }
+    if !dialog_gcd_compressed_log_u_high_runway_enabled() {
+        return Some(&future[future.len() - raw_bits..]);
+    }
+    // Keep the raw host after the largest possible carry+gated prefix and away
+    // from active u.  With remapped runway cells the old final-six shortcut can
+    // alias the growing reverse u prefix.
+    future[want..]
+        .windows(raw_bits)
+        .rev()
+        .find(|candidate| !dialog_gcd_slice_intersects(candidate, &u[..active_width]))
 }
-
 pub(crate) fn dialog_gcd_forward_raw_block_host<'a>(
     u: &'a [QubitId],
     compressed_log: &'a [QubitId],
@@ -78,16 +91,32 @@ pub(crate) fn dialog_gcd_forward_raw_block_host<'a>(
     let future_start = (block + 1) * DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS;
     if let Some(future) = compressed_log.get(future_start..) {
         if future.len() >= want + 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE {
-            return Some(&future[future.len() - 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE..]);
+            let raw_bits = 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE;
+            if !dialog_gcd_compressed_log_u_high_runway_enabled() {
+                return Some(&future[future.len() - raw_bits..]);
+            }
+            if let Some(candidate) = future[want..]
+                .windows(raw_bits)
+                .rev()
+                .find(|candidate| !dialog_gcd_slice_intersects(candidate, &u[..active_width]))
+            {
+                return Some(candidate);
+            }
         }
     }
     if u.len().saturating_sub(active_width) >= want + 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE {
-        Some(&u[u.len() - 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE..])
+        let candidate = &u[u.len() - 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE..];
+        if !dialog_gcd_compressed_log_u_high_runway_enabled()
+            || !dialog_gcd_slice_intersects(candidate, compressed_log)
+        {
+            Some(candidate)
+        } else {
+            None
+        }
     } else {
         None
     }
 }
-
 pub(crate) fn dialog_gcd_compressed_sidecar_future_carry_slice(
     compressed_log: &[QubitId],
     step: usize,
@@ -131,11 +160,14 @@ pub(crate) fn dialog_gcd_copy_compressed_block_to_raw(
     );
     assert_eq!(raw_block.len(), 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE);
     for i in 0..DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS {
-        b.cx(compressed_block[i], raw_block[i]);
+        if dialog_gcd_apply_replay_swap_host_enabled() {
+            b.swap(compressed_block[i], raw_block[i]);
+        } else {
+            b.cx(compressed_block[i], raw_block[i]);
+        }
     }
     emit_dialog_gcd_round763_compressor_inverse(b, raw_block);
 }
-
 pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_block_lifecycle(
     b: &mut B,
     u: &[QubitId],
@@ -174,13 +206,14 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_block_lifecyc
             let v_active = &v[..active_width];
             let compare_bits = dialog_gcd_compare_bits_for_step(step, active_width);
 
-            let borrowed_carries = dialog_gcd_pick_borrow_slice(
+            let borrowed_carries = dialog_gcd_pick_runway_safe_borrow_slice(
                 dialog_gcd_compressed_sidecar_future_carry_slice(
                     compressed_log,
                     step,
                     active_width,
                 ),
                 u,
+                compressed_log,
                 active_width,
             );
 
@@ -243,6 +276,17 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_block_lifecyc
         b.set_phase("dialog_gcd_compressed_block_tobitvector_compress_block");
         emit_dialog_gcd_round763_compressor(b, raw_block);
         let compressed_block = dialog_gcd_compressed_sidecar_block(compressed_log, start);
+        if dialog_gcd_compressed_log_u_high_runway_enabled() {
+            // A parked forward block is first written only after its high-u
+            // hosts have left the active prefix.
+            assert!(
+                !dialog_gcd_slice_intersects(
+                    compressed_block,
+                    &u[..dialog_gcd_tobitvector_active_width(start)]
+                ),
+                "compressed-log runway overlaps active forward u prefix at block {block}"
+            );
+        }
         for i in 0..DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS {
             b.swap(raw_block[i], compressed_block[i]);
         }
@@ -251,7 +295,6 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_block_lifecyc
         }
     }
 }
-
 pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_reverse_block_lifecycle(
     b: &mut B,
     u: &[QubitId],
@@ -284,6 +327,17 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_reverse_block
         });
 
         b.set_phase("dialog_gcd_compressed_block_tobitvector_reverse_decompress_block");
+        if dialog_gcd_compressed_log_u_high_runway_enabled() {
+            // A parked block must be consumed while all of its high-u hosts are
+            // outside this block's active prefix.
+            assert!(
+                !dialog_gcd_slice_intersects(
+                    compressed_block,
+                    &u[..dialog_gcd_tobitvector_active_width(start)]
+                ),
+                "compressed-log runway overlaps active reverse u prefix at block {block}"
+            );
+        }
         for i in 0..DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS {
             b.swap(compressed_block[i], raw_block[i]);
         }
@@ -302,13 +356,14 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_reverse_block
             dialog_gcd_unshift_right_assuming_even(b, v_active);
 
             b.set_phase("dialog_gcd_compressed_block_tobitvector_reverse_add");
-            let borrowed_carries = dialog_gcd_pick_borrow_slice(
+            let borrowed_carries = dialog_gcd_pick_runway_safe_borrow_slice(
                 dialog_gcd_compressed_sidecar_future_carry_slice(
                     compressed_log,
                     step,
                     active_width,
                 ),
                 u,
+                compressed_log,
                 active_width,
             );
             dialog_gcd_controlled_add_selected(b, u_active, v_active, b0, borrowed_carries);
@@ -363,7 +418,6 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps_reverse_block
         }
     }
 }
-
 pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_block_lifecycle(
     b: &mut B,
     compressed_log: &[QubitId],
@@ -382,6 +436,11 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_block_lifecycle
 
         b.set_phase("dialog_gcd_compressed_block_apply_decompress_block");
         dialog_gcd_copy_compressed_block_to_raw(b, compressed_block, raw_block);
+        let clean_scratch = if dialog_gcd_apply_replay_swap_host_enabled() {
+            compressed_block
+        } else {
+            &[]
+        };
 
         for step in (start..end).rev() {
             let slot = step - start;
@@ -393,7 +452,14 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_block_lifecycle
 
             b.set_phase("dialog_gcd_compressed_block_apply_cadd");
             if dialog_gcd_raw_apply_materialized_special_add_enabled() {
-                dialog_gcd_cmod_add_materialized_pseudomersenne(b, y, x, b0, p);
+                dialog_gcd_cmod_add_materialized_pseudomersenne_with_clean_scratch(
+                    b,
+                    y,
+                    x,
+                    b0,
+                    p,
+                    clean_scratch,
+                );
             } else if dialog_gcd_raw_apply_direct_special_add_enabled() {
                 dialog_gcd_cmod_add_pseudomersenne_lowq(b, y, x, b0, p);
             } else {
@@ -410,7 +476,6 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_block_lifecycle
         dialog_gcd_clear_raw_block_copy(b, compressed_block, raw_block);
     }
 }
-
 pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_reverse_exact_block_lifecycle(
     b: &mut B,
     compressed_log: &[QubitId],
@@ -429,6 +494,11 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_reverse_exact_b
 
         b.set_phase("dialog_gcd_compressed_block_apply_reverse_decompress_block");
         dialog_gcd_copy_compressed_block_to_raw(b, compressed_block, raw_block);
+        let clean_scratch = if dialog_gcd_apply_replay_swap_host_enabled() {
+            compressed_block
+        } else {
+            &[]
+        };
 
         for step in start..end {
             let slot = step - start;
@@ -442,7 +512,14 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_reverse_exact_b
 
             b.set_phase("dialog_gcd_compressed_block_apply_reverse_csub");
             if dialog_gcd_raw_apply_reverse_materialized_special_sub_enabled() {
-                dialog_gcd_cmod_sub_materialized_pseudomersenne(b, y, x, b0, p);
+                dialog_gcd_cmod_sub_materialized_pseudomersenne_with_clean_scratch(
+                    b,
+                    y,
+                    x,
+                    b0,
+                    p,
+                    clean_scratch,
+                );
             } else if dialog_gcd_raw_apply_reverse_fast_sub_enabled() {
                 cmod_sub_qq(b, y, x, b0, p);
             } else {
@@ -457,7 +534,6 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_apply_bitvector_reverse_exact_b
         dialog_gcd_clear_raw_block_copy(b, compressed_block, raw_block);
     }
 }
-
 pub(crate) fn emit_dialog_gcd_compressed_sidecar_tobitvector_steps(
     b: &mut B,
     u: &[QubitId],
@@ -715,13 +791,17 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
     assert_eq!(factor.len(), N);
     assert_eq!(target.len(), N);
 
-    let compressed_log = b.alloc_qubits(dialog_gcd_compressed_sidecar_bits());
+    let compressed_log = b.alloc_qubits(dialog_gcd_allocated_compressed_sidecar_bits());
     let raw_block = if dialog_gcd_host_reverse_raw_block_enabled() {
         Vec::new()
     } else {
         b.alloc_qubits(2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE)
     };
     let u = b.alloc_qubits(N);
+    let runway = dialog_gcd_build_compressed_log_u_high_runway(&u, &compressed_log);
+    let replay_log = runway
+        .as_ref()
+        .map_or(compressed_log.as_slice(), |r| r.remapped_log.as_slice());
     b.set_phase("dialog_gcd_compressed_block_ipmul_load_p");
     for i in 0..N {
         if bit(p, i) {
@@ -734,14 +814,14 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
         b,
         &u,
         factor,
-        &compressed_log,
+        replay_log,
         &raw_block,
     );
 
     if dialog_gcd_raw_ipmul_terminal_reuse_enabled() {
         b.set_phase("dialog_gcd_compressed_block_ipmul_release_terminal_u");
         b.x(u[0]);
-        b.free_vec(&u);
+        dialog_gcd_release_terminal_u(b, &u, runway.as_ref());
 
         b.set_phase("dialog_gcd_compressed_block_ipmul_apply_bitvector_reuse_factor_zero");
         let apply_raw_block = if dialog_gcd_host_reverse_raw_block_enabled() {
@@ -751,7 +831,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
         };
         emit_dialog_gcd_compressed_sidecar_apply_bitvector_block_lifecycle(
             b,
-            &compressed_log,
+            replay_log,
             target,
             factor,
             p,
@@ -776,7 +856,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
         }
 
         b.set_phase("dialog_gcd_compressed_block_ipmul_reacquire_terminal_u");
-        b.reacquire_vec(&u);
+        dialog_gcd_reacquire_terminal_u(b, &u, runway.as_ref());
         b.set_phase("dialog_gcd_compressed_block_ipmul_seed_terminal_u");
         b.x(u[0]);
 
@@ -785,7 +865,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
             b,
             &u,
             factor,
-            &compressed_log,
+            replay_log,
             &raw_block,
         );
 
@@ -807,7 +887,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
     b.set_phase("dialog_gcd_compressed_block_ipmul_apply_bitvector");
     emit_dialog_gcd_compressed_sidecar_apply_bitvector_block_lifecycle(
         b,
-        &compressed_log,
+        replay_log,
         target,
         &tmp,
         p,
@@ -827,7 +907,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
         b,
         &u,
         factor,
-        &compressed_log,
+        replay_log,
         &raw_block,
     );
 
@@ -841,9 +921,6 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul_block_lifecycle(
     b.free_vec(&raw_block);
     b.free_vec(&compressed_log);
 }
-
-// ─── merged from compressed2.rs ───
-
 pub(crate) fn emit_dialog_gcd_compressed_sidecar_ipmul(
     b: &mut B,
     factor: &[QubitId],
@@ -988,13 +1065,17 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
     assert_eq!(factor.len(), N);
     assert_eq!(target.len(), N);
 
-    let compressed_log = b.alloc_qubits(dialog_gcd_compressed_sidecar_bits());
+    let compressed_log = b.alloc_qubits(dialog_gcd_allocated_compressed_sidecar_bits());
     let raw_block = if dialog_gcd_host_reverse_raw_block_enabled() {
         Vec::new()
     } else {
         b.alloc_qubits(2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE)
     };
     let u = b.alloc_qubits(N);
+    let runway = dialog_gcd_build_compressed_log_u_high_runway(&u, &compressed_log);
+    let replay_log = runway
+        .as_ref()
+        .map_or(compressed_log.as_slice(), |r| r.remapped_log.as_slice());
     b.set_phase("dialog_gcd_compressed_block_quotient_load_p");
     for i in 0..N {
         if bit(p, i) {
@@ -1007,14 +1088,14 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
         b,
         &u,
         factor,
-        &compressed_log,
+        replay_log,
         &raw_block,
     );
 
     if dialog_gcd_raw_quotient_terminal_reuse_enabled() {
         b.set_phase("dialog_gcd_compressed_block_quotient_release_terminal_u");
         b.x(u[0]);
-        b.free_vec(&u);
+        dialog_gcd_release_terminal_u(b, &u, runway.as_ref());
 
         b.set_phase("dialog_gcd_compressed_block_quotient_apply_reverse_reuse_factor_zero");
         let apply_raw_block = if dialog_gcd_host_reverse_raw_block_enabled() {
@@ -1024,7 +1105,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
         };
         emit_dialog_gcd_compressed_sidecar_apply_bitvector_reverse_exact_block_lifecycle(
             b,
-            &compressed_log,
+            replay_log,
             factor,
             target,
             p,
@@ -1040,7 +1121,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
         }
 
         b.set_phase("dialog_gcd_compressed_block_quotient_reacquire_terminal_u");
-        b.reacquire_vec(&u);
+        dialog_gcd_reacquire_terminal_u(b, &u, runway.as_ref());
         b.set_phase("dialog_gcd_compressed_block_quotient_seed_terminal_u");
         b.x(u[0]);
 
@@ -1049,7 +1130,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
             b,
             &u,
             factor,
-            &compressed_log,
+            replay_log,
             &raw_block,
         );
 
@@ -1070,7 +1151,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
     b.set_phase("dialog_gcd_compressed_block_quotient_apply_reverse");
     emit_dialog_gcd_compressed_sidecar_apply_bitvector_reverse_exact_block_lifecycle(
         b,
-        &compressed_log,
+        replay_log,
         factor,
         target,
         p,
@@ -1082,7 +1163,7 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
         b,
         &u,
         factor,
-        &compressed_log,
+        replay_log,
         &raw_block,
     );
 
@@ -1096,7 +1177,6 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient_block_lifecycle(
     b.free_vec(&raw_block);
     b.free_vec(&compressed_log);
 }
-
 pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient(
     b: &mut B,
     factor: &[QubitId],
@@ -1212,4 +1292,236 @@ pub(crate) fn emit_dialog_gcd_compressed_sidecar_quotient(
     b.free(compressor_scratch);
     b.free_vec(&pair);
     b.free_vec(&compressed_log);
+}
+
+
+pub(crate) fn assert_qubit_slices_disjoint(slices: &[&[QubitId]]) {
+    let mut seen = std::collections::BTreeSet::new();
+    for slice in slices {
+        for &q in *slice {
+            assert!(seen.insert(q), "scratch lane q{} aliases an operand", q.0);
+        }
+    }
+}
+
+pub(crate) fn dialog_gcd_slice_intersects(a: &[QubitId], b: &[QubitId]) -> bool {
+    a.iter().any(|q| b.contains(q))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DialogGcdCompressedLogUHighRunway {
+    remapped_log: Vec<QubitId>,
+    parked_u_indices: Vec<usize>,
+}
+
+pub(crate) fn dialog_gcd_allocated_compressed_sidecar_bits() -> usize {
+    if dialog_gcd_compressed_log_u_high_runway_enabled() {
+        dialog_gcd_compressed_sidecar_bits() - dialog_gcd_runway_layout().len()
+    } else {
+        dialog_gcd_compressed_sidecar_bits()
+    }
+}
+
+pub(crate) fn dialog_gcd_apply_replay_swap_host_enabled() -> bool {
+    // Prototype, deliberately NOT enabled by configure_ecdsafail_submission_route.
+    //
+    // Block-lifecycle apply normally CNOT-copies the current compressed
+    // transcript block into raw_block before decompressing it.  Swapping the
+    // five compressed cells into raw_block instead leaves five allocated,
+    // clean cells available throughout the three replay steps.  The matching
+    // swap after recompression restores the transcript block.
+    std::env::var("DIALOG_GCD_APPLY_REPLAY_SWAP_HOST")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+pub(crate) fn dialog_gcd_build_compressed_log_u_high_runway(
+    u: &[QubitId],
+    allocated_log: &[QubitId],
+) -> Option<DialogGcdCompressedLogUHighRunway> {
+    if !dialog_gcd_compressed_log_u_high_runway_enabled() {
+        return None;
+    }
+    assert_eq!(u.len(), N);
+    let layout = dialog_gcd_runway_layout();
+    if layout.is_empty() {
+        return None;
+    }
+
+    let expected_allocated = dialog_gcd_compressed_sidecar_bits() - layout.len();
+    assert_eq!(allocated_log.len(), expected_allocated);
+    let first_relocated = layout[0].0;
+    assert_eq!(first_relocated, allocated_log.len());
+    let mut remapped_log = allocated_log.to_vec();
+    let mut parked_u_indices = Vec::with_capacity(layout.len());
+    for (log_index, u_index) in layout {
+        // These logical transcript cells are not needed until their late
+        // forward blocks, when the width envelope guarantees that u[u_index] is
+        // inactive and |0>.  Reverse consumes them before u grows back into the
+        // same hosts.
+        assert_eq!(log_index, remapped_log.len());
+        remapped_log.push(u[u_index]);
+        parked_u_indices.push(u_index);
+    }
+    assert_eq!(remapped_log.len(), dialog_gcd_compressed_sidecar_bits());
+    Some(DialogGcdCompressedLogUHighRunway {
+        remapped_log,
+        parked_u_indices,
+    })
+}
+
+pub(crate) fn dialog_gcd_compressed_log_u_high_runway_blocks() -> usize {
+    // Optional tuning cap for the prototype.  The uncapped layout parks the
+    // longest suffix; lowering the cap is useful when balancing wrapper savings
+    // against reverse-replay scratch pressure.  On the accepted a8d8d5a route,
+    // 16 whole blocks is the largest prefix-independent tail runway before the
+    // reverse add loses its cheap scratch host.  Keep larger schedules available
+    // as an explicit experiment, but default the opt-in prototype to that safe
+    // subset.
+    std::env::var("DIALOG_GCD_COMPRESSED_LOG_U_HIGH_RUNWAY_BLOCKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(16)
+}
+
+pub(crate) fn dialog_gcd_compressed_log_u_high_runway_enabled() -> bool {
+    // Prototype, deliberately NOT enabled by configure_ecdsafail_submission_route.
+    //
+    // The wrapper used to allocate all of u and the complete compressed
+    // transcript at once.  Instead, a late transcript suffix can use high u
+    // lanes: those cells are not touched until forward replay has shrunk u below
+    // their hosts, stay live across terminal-reuse apply, and are consumed by
+    // reverse replay before u grows back into them.
+    //
+    // This is an experimental support-envelope optimization: it relies on the
+    // same terminal convergence and width envelope as terminal reuse and
+    // variable-width tobitvector.  Default OFF keeps the accepted route
+    // byte-identical.
+    std::env::var("DIALOG_GCD_COMPRESSED_LOG_U_HIGH_RUNWAY")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+pub(crate) fn dialog_gcd_pick_runway_safe_borrow_slice<'a>(
+    future: Option<&'a [QubitId]>,
+    u: &'a [QubitId],
+    compressed_log: &[QubitId],
+    active_width: usize,
+) -> Option<&'a [QubitId]> {
+    if !dialog_gcd_compressed_log_u_high_runway_enabled() {
+        return dialog_gcd_pick_borrow_slice(future, u, active_width);
+    }
+
+    let safe_future = dialog_gcd_runway_safe_future_prefix(future, u, active_width);
+    if dialog_gcd_late_borrow_uv_high_enabled() && active_width >= 1 {
+        let want = 2 * active_width - 1;
+        let short = safe_future.map_or(true, |slice| slice.len() < want);
+        if short && u.len() >= active_width + want {
+            let candidate = &u[active_width..active_width + want];
+            // Parked cells can still carry unread transcript data.  Be
+            // conservative: only use an in-place high-u fallback when it is
+            // disjoint from every logical transcript cell, including clean
+            // parked cells already consumed by reverse replay.
+            if !dialog_gcd_slice_intersects(candidate, compressed_log) {
+                return Some(candidate);
+            }
+        }
+    }
+    safe_future
+}
+
+pub(crate) fn dialog_gcd_reacquire_terminal_u(
+    b: &mut B,
+    u: &[QubitId],
+    runway: Option<&DialogGcdCompressedLogUHighRunway>,
+) {
+    for (index, &q) in u.iter().enumerate() {
+        if runway.is_none_or(|r| !r.parked_u_indices.contains(&index)) {
+            b.reacquire(q);
+        }
+    }
+}
+
+pub(crate) fn dialog_gcd_release_terminal_u(
+    b: &mut B,
+    u: &[QubitId],
+    runway: Option<&DialogGcdCompressedLogUHighRunway>,
+) {
+    for (index, &q) in u.iter().enumerate() {
+        if runway.is_none_or(|r| !r.parked_u_indices.contains(&index)) {
+            b.free(q);
+        }
+    }
+}
+
+pub(crate) fn dialog_gcd_runway_layout() -> Vec<(usize, usize)> {
+    // Leave the top six u lanes unparked.  The accepted a8d8d5a route hosts a
+    // raw 3-step block there whenever the tail is wide enough; reserving those
+    // lanes keeps that scratch host disjoint from parked transcript cells.
+    let raw_block_bits = 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE;
+    let Some(highest_host) = N.checked_sub(raw_block_bits + 1) else {
+        return Vec::new();
+    };
+    let blocks = dialog_gcd_compressed_sidecar_blocks();
+
+    // Find the longest whole-block suffix that fits.  Blocks are assigned in
+    // forward order to descending u positions: the earliest parked block gets
+    // the highest hosts because it is replayed last and therefore needs the
+    // widest inactive-u threshold.
+    let first_allowed = blocks.saturating_sub(dialog_gcd_compressed_log_u_high_runway_blocks());
+    for first_block in first_allowed..blocks {
+        let mut next_host = highest_host;
+        let mut layout = Vec::with_capacity(
+            (blocks - first_block) * DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS,
+        );
+        let mut fits = true;
+        for block in first_block..blocks {
+            let (start, end) = dialog_gcd_compressed_sidecar_block_step_range(block);
+            let active_threshold = (start..end)
+                .map(dialog_gcd_tobitvector_active_width)
+                .max()
+                .unwrap_or(1);
+            for slot in 0..DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS {
+                if next_host < active_threshold {
+                    fits = false;
+                    break;
+                }
+                layout.push((
+                    block * DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS + slot,
+                    next_host,
+                ));
+                let Some(next) = next_host.checked_sub(1) else {
+                    fits = false;
+                    break;
+                };
+                next_host = next;
+            }
+            if !fits {
+                break;
+            }
+        }
+        if fits {
+            return layout;
+        }
+    }
+    Vec::new()
+}
+
+pub(crate) fn dialog_gcd_runway_safe_future_prefix<'a>(
+    future: Option<&'a [QubitId]>,
+    u: &[QubitId],
+    active_width: usize,
+) -> Option<&'a [QubitId]> {
+    let active_u = &u[..active_width];
+    future
+        .map(|slice| {
+            let safe = slice
+                .iter()
+                .position(|q| active_u.contains(q))
+                .unwrap_or(slice.len());
+            &slice[..safe]
+        })
+        .filter(|slice| !slice.is_empty())
 }

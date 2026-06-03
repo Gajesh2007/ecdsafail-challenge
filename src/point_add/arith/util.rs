@@ -254,6 +254,11 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     set_default_env("DIALOG_GCD_COMPRESSED_SIDECAR_LOG", "1");
     set_default_env("DIALOG_GCD_COMPRESSED_BLOCK_LIFECYCLE", "1");
     set_default_env("DIALOG_GCD_HOST_REVERSE_RAW_BLOCK", "1");
+    set_default_env("DIALOG_GCD_COMPRESSED_LOG_U_HIGH_RUNWAY", "1");
+    set_default_env("DIALOG_GCD_COMPRESSED_LOG_U_HIGH_RUNWAY_BLOCKS", "4");
+    set_default_env("DIALOG_GCD_APPLY_REPLAY_SWAP_HOST", "1");
+    set_default_env("SQUARE_SELFHOST_SAFE_LANE_REUSE", "1");
+    set_default_env("SQUARE_SELFHOST_GATE_SUFFIX_CARRIES", "1");
     set_default_env("DIALOG_GCD_PA9024_COMPARE_SCHEDULE", "1");
     // PA9024 compare-schedule margin retuned with ACTIVE_ITERATIONS=396 and
     // APPLY_CLEAN_COMPARE_BITS=21. The wider margin gives back a little Toffoli
@@ -279,7 +284,13 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     // island documented below.
     // Branch comparator 58 -> 57: -1,064 executed Toffoli, peak-neutral at 1434q,
     // stacked on the active395 base. Clean island at REROLL=4959 / POST_SUB=5983.
-    set_default_env("DIALOG_GCD_COMPARE_BITS", "58");
+    // Branch comparator 58 -> 56: -2,144 avg-executed Toffoli (1,724,981 ->
+    // 1,722,837), stacked on the 1411q square-carry base (457d964 / e0cfe2b).
+    // Peak-neutral at 1411 qubits. The tighter truncation re-rolls the
+    // Fiat-Shamir island; a 1-D reroll sweep (post_sub=0) lands a clean 0/0/0
+    // over all 9024 shots at DIALOG_REROLL=444 (set below). Verified via
+    // override-free eval_circuit. Score 2,433,948,191 -> 2,430,923,007.
+    set_default_env("DIALOG_GCD_COMPARE_BITS", "56");
     // Apply-phase cmod-correction comparator tightened 20 -> 19 (-790 executed
     // Toffoli, peak-neutral at 1434q) -- an orthogonal value-exact lever the
     // frontier had dropped, stacked on compare57+active395. Clean island below.
@@ -328,7 +339,7 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     // PA9024_COMPARE_SCHEDULE_MARGIN 8->7: -5,576 executed Toffoli at the 1434
     // peak. Re-rolled Fiat-Shamir island lands clean (0/0/0 over 9024) at
     // DIALOG_REROLL=0 / DIALOG_POST_SUB_REROLL=44. 1434q x 1,733,573 T = 2,485,943,682.
-    set_default_env("DIALOG_GCD_WIDTH_MARGIN", "25");
+    set_default_env("DIALOG_GCD_WIDTH_MARGIN", "26");
     // Measured (Gidney) uncompute for the apply-phase modular subtract's raw
     // difference, mirroring the already-measured apply ADD. ~n Toffoli instead
     // of ~2n per call; peak-neutral (same carry lane the ADD already uses).
@@ -415,12 +426,13 @@ pub(crate) fn configure_ecdsafail_submission_route() {
     // 399 T/qubit, far inside break-even. Score 1446 x 1,740,263 = 2,516,420,298.
     set_default_env("DIALOG_GCD_BODY_HOST_CIN", "1");
     set_default_env("DIALOG_GCD_LATE_BORROW_UV_HIGH", "1");
-    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "123");
-    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT2", "133");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT", "116");
+    set_default_env("DIALOG_GCD_APPLY_CHUNKED_F_CUT2", "140");
     // Active-396 island: compare_bits=58 + apply_clean=21 + schedule margin=8
     // validates 0/0/0 over all 9024 shots at 1438q x 1,736,773 T.
-    set_default_env("DIALOG_REROLL", "164");
-    set_default_env("DIALOG_POST_SUB_REROLL", "100");
+    // compare56 clean island (1-D reroll sweep on the 1411q base, post_sub=0).
+    set_default_env("DIALOG_REROLL", "444");
+    set_default_env("DIALOG_POST_SUB_REROLL", "0");
     // Fuse the branch-bit comparator with the b0-controlled log update: derive
     // b0_and_b1 from the in-flight comparator carry instead of materializing a
     // separate cmp qubit and recomputing the comparator for uncompute. Pure

@@ -111,7 +111,21 @@ pub(crate) fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[Q
         let slice: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
         if z02_lowq {
             if kara_z2_selfhost_enabled() {
-                schoolbook_square_symmetric_lowq_selfhosted(b, &x_hi, &slice);
+                if square_selfhost_safe_lane_reuse_enabled() {
+                    // z1=(lo+hi)^2 and z0=lo^2 are exact integer squares here.
+                    // Every square is 0 or 1 mod 4, so bit 1 of each register is
+                    // provably |0>.  Both lanes are disjoint from x_hi, z2, and
+                    // z2's own untouched-tail carry lanes.
+                    let clean_square_bits = [z1_reg[1], tmp_ext[1]];
+                    schoolbook_square_symmetric_lowq_selfhosted_with_clean_supplement(
+                        b,
+                        &x_hi,
+                        &slice,
+                        &clean_square_bits,
+                    );
+                } else {
+                    schoolbook_square_symmetric_lowq_selfhosted(b, &x_hi, &slice);
+                }
             } else {
                 schoolbook_square_symmetric_lowq(b, &x_hi, &slice);
             }
@@ -300,7 +314,20 @@ pub(crate) fn squaring_sub_from_acc_karatsuba(b: &mut B, acc: &[QubitId], x: &[Q
         let slice: Vec<QubitId> = tmp_ext[2 * h..4 * h].to_vec();
         if z02_lowq {
             if kara_z2_selfhost_enabled() {
-                schoolbook_square_symmetric_lowq_selfhosted_inverse(b, &x_hi, &slice);
+                if square_selfhost_safe_lane_reuse_enabled() {
+                    // Inverse-combine restored the exact z1 and z0 squares
+                    // before this block, so their square-bit-1 lanes are clean
+                    // scratch again (the mirror of the forward z2 proof).
+                    let clean_square_bits = [z1_reg[1], tmp_ext[1]];
+                    schoolbook_square_symmetric_lowq_selfhosted_inverse_with_clean_supplement(
+                        b,
+                        &x_hi,
+                        &slice,
+                        &clean_square_bits,
+                    );
+                } else {
+                    schoolbook_square_symmetric_lowq_selfhosted_inverse(b, &x_hi, &slice);
+                }
             } else {
                 schoolbook_square_symmetric_lowq_inverse(b, &x_hi, &slice);
             }

@@ -420,10 +420,13 @@ pub(crate) fn dialog_gcd_clear_raw_block_copy(b: &mut B, compressed_block: &[Qub
     assert_eq!(raw_block.len(), 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE);
     emit_dialog_gcd_round763_compressor(b, raw_block);
     for i in 0..DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS {
-        b.cx(compressed_block[i], raw_block[i]);
+        if dialog_gcd_apply_replay_swap_host_enabled() {
+            b.swap(compressed_block[i], raw_block[i]);
+        } else {
+            b.cx(compressed_block[i], raw_block[i]);
+        }
     }
 }
-
 pub(crate) fn emit_dialog_gcd_raw_quotient(b: &mut B, factor: &[QubitId], target: &[QubitId], p: U256) {
     assert_eq!(factor.len(), N);
     assert_eq!(target.len(), N);

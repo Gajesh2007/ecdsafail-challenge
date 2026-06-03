@@ -137,6 +137,9 @@ pub(crate) fn schoolbook_square_symmetric_lowq_inverse(b: &mut B, x: &[QubitId],
 pub(crate) fn schoolbook_square_symmetric_hosted(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId], host: &[QubitId]) {
     let n = x.len();
     debug_assert_eq!(tmp_ext.len(), 2 * n);
+    if square_selfhost_safe_lane_reuse_enabled() {
+        assert_qubit_slices_disjoint(&[x, tmp_ext, host]);
+    }
     for i in 0..n {
         let width = if i == n - 1 { 1 } else { n - i + 1 };
         let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
@@ -145,14 +148,33 @@ pub(crate) fn schoolbook_square_symmetric_hosted(b: &mut B, x: &[QubitId], tmp_e
         for k in 0..num_cross {
             b.ccx(x[i], x[i + 1 + k], row[k + 2]);
         }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
         let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_add_fast_borrowed_carries(b, &row_padded, &slice, c_in, &host[..row_padded.len() - 1]);
-        b.free(c_in);
-        b.free(pad);
+        if square_selfhost_safe_lane_reuse_enabled() {
+            // The z2 sibling host is clean and disjoint from x and z0.  It has
+            // ample room for both the width carry lanes and one clean c_in.
+            assert!(host.len() > width);
+            cuccaro_add_fast_low_to_ext_borrowed_carries(
+                b,
+                &row,
+                &slice,
+                host[width],
+                &host[..width],
+            );
+        } else {
+            let pad = b.alloc_qubit();
+            let mut row_padded = row.clone();
+            row_padded.push(pad);
+            let c_in = b.alloc_qubit();
+            cuccaro_add_fast_borrowed_carries(
+                b,
+                &row_padded,
+                &slice,
+                c_in,
+                &host[..row_padded.len() - 1],
+            );
+            b.free(c_in);
+            b.free(pad);
+        }
         b.cx(x[i], row[0]);
         for k in 0..num_cross {
             let m = b.alloc_bit();
@@ -162,7 +184,6 @@ pub(crate) fn schoolbook_square_symmetric_hosted(b: &mut B, x: &[QubitId], tmp_e
         b.free_vec(&row);
     }
 }
-
 pub(crate) fn schoolbook_square_symmetric_hosted_inverse(
     b: &mut B,
     x: &[QubitId],
@@ -170,6 +191,9 @@ pub(crate) fn schoolbook_square_symmetric_hosted_inverse(
     host: &[QubitId],
 ) {
     let n = x.len();
+    if square_selfhost_safe_lane_reuse_enabled() {
+        assert_qubit_slices_disjoint(&[x, tmp_ext, host]);
+    }
     for i in (0..n).rev() {
         let width = if i == n - 1 { 1 } else { n - i + 1 };
         let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
@@ -178,14 +202,31 @@ pub(crate) fn schoolbook_square_symmetric_hosted_inverse(
         for k in 0..num_cross {
             b.ccx(x[i], x[i + 1 + k], row[k + 2]);
         }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
         let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_sub_fast_borrowed_carries(b, &row_padded, &slice, c_in, &host[..row_padded.len() - 1]);
-        b.free(c_in);
-        b.free(pad);
+        if square_selfhost_safe_lane_reuse_enabled() {
+            assert!(host.len() > width);
+            cuccaro_sub_fast_low_to_ext_borrowed_carries(
+                b,
+                &row,
+                &slice,
+                host[width],
+                &host[..width],
+            );
+        } else {
+            let pad = b.alloc_qubit();
+            let mut row_padded = row.clone();
+            row_padded.push(pad);
+            let c_in = b.alloc_qubit();
+            cuccaro_sub_fast_borrowed_carries(
+                b,
+                &row_padded,
+                &slice,
+                c_in,
+                &host[..row_padded.len() - 1],
+            );
+            b.free(c_in);
+            b.free(pad);
+        }
         b.cx(x[i], row[0]);
         for k in 0..num_cross {
             let m = b.alloc_bit();
@@ -195,83 +236,12 @@ pub(crate) fn schoolbook_square_symmetric_hosted_inverse(
         b.free_vec(&row);
     }
 }
-
 pub(crate) fn schoolbook_square_symmetric_lowq_selfhosted(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    debug_assert_eq!(tmp_ext.len(), 2 * n);
-    for i in 0..n {
-        let width = if i == n - 1 { 1 } else { n - i + 1 };
-        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
-        let row = b.alloc_qubits(width);
-        b.cx(x[i], row[0]);
-        for k in 0..num_cross {
-            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
-        }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
-        let hi = 2 * i + width + 1;
-        let slice: Vec<QubitId> = tmp_ext[2 * i..hi].to_vec();
-        let need = row_padded.len() - 1;
-        let avail = tmp_ext.len() - hi;
-        let from_tmp = need.min(avail);
-        let from_global = need - from_tmp;
-        let gpool = b.alloc_qubits(from_global);
-        let mut carries: Vec<QubitId> = tmp_ext[hi..hi + from_tmp].to_vec();
-        carries.extend_from_slice(&gpool);
-        let c_in = b.alloc_qubit();
-        cuccaro_add_fast_borrowed_carries(b, &row_padded, &slice, c_in, &carries);
-        b.free(c_in);
-        b.free_vec(&gpool);
-        b.free(pad);
-        b.cx(x[i], row[0]);
-        for k in 0..num_cross {
-            let m = b.alloc_bit();
-            b.hmr(row[k + 2], m);
-            b.cz_if(x[i], x[i + 1 + k], m);
-        }
-        b.free_vec(&row);
-    }
+    schoolbook_square_symmetric_lowq_selfhosted_with_clean_supplement(b, x, tmp_ext, &[]);
 }
-
 pub(crate) fn schoolbook_square_symmetric_lowq_selfhosted_inverse(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    debug_assert_eq!(tmp_ext.len(), 2 * n);
-    for i in (0..n).rev() {
-        let width = if i == n - 1 { 1 } else { n - i + 1 };
-        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
-        let row = b.alloc_qubits(width);
-        b.cx(x[i], row[0]);
-        for k in 0..num_cross {
-            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
-        }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
-        let hi = 2 * i + width + 1;
-        let slice: Vec<QubitId> = tmp_ext[2 * i..hi].to_vec();
-        let need = row_padded.len() - 1;
-        let avail = tmp_ext.len() - hi;
-        let from_tmp = need.min(avail);
-        let from_global = need - from_tmp;
-        let gpool = b.alloc_qubits(from_global);
-        let mut carries: Vec<QubitId> = tmp_ext[hi..hi + from_tmp].to_vec();
-        carries.extend_from_slice(&gpool);
-        let c_in = b.alloc_qubit();
-        cuccaro_sub_fast_borrowed_carries(b, &row_padded, &slice, c_in, &carries);
-        b.free(c_in);
-        b.free_vec(&gpool);
-        b.free(pad);
-        b.cx(x[i], row[0]);
-        for k in 0..num_cross {
-            let m = b.alloc_bit();
-            b.hmr(row[k + 2], m);
-            b.cz_if(x[i], x[i + 1 + k], m);
-        }
-        b.free_vec(&row);
-    }
+    schoolbook_square_symmetric_lowq_selfhosted_inverse_with_clean_supplement(b, x, tmp_ext, &[]);
 }
-
 pub(crate) fn kara_z2_selfhost_enabled() -> bool {
     std::env::var("KARA_Z2_SELFHOST").ok().as_deref() != Some("0")
 }
@@ -380,4 +350,171 @@ pub(crate) fn squaring_sub_from_acc_schoolbook_lowq_shift22(
         schoolbook_square_symmetric_lowq_inverse(b, x, &tmp_ext);
     }
     b.free_vec(&tmp_ext);
+}
+
+
+pub(crate) fn schoolbook_square_symmetric_lowq_selfhosted_with_clean_supplement(
+    b: &mut B,
+    x: &[QubitId],
+    tmp_ext: &[QubitId],
+    clean_supplement: &[QubitId],
+) {
+    let n = x.len();
+    debug_assert_eq!(tmp_ext.len(), 2 * n);
+    let safe_reuse = square_selfhost_safe_lane_reuse_enabled();
+    if safe_reuse {
+        assert_qubit_slices_disjoint(&[x, tmp_ext, clean_supplement]);
+    }
+    let gate_prefix_rows = std::env::var("SQUARE_SELFHOST_GATE_PREFIX_ROWS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    for i in 0..n {
+        let width = if i == n - 1 { 1 } else { n - i + 1 };
+        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
+        let row = b.alloc_qubits(width);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
+        }
+        let hi = 2 * i + width + 1;
+        let slice: Vec<QubitId> = tmp_ext[2 * i..hi].to_vec();
+        if i < gate_prefix_rows {
+            let pad = b.alloc_qubit();
+            let mut row_padded = row.clone();
+            row_padded.push(pad);
+            let c_in = b.alloc_qubit();
+            cuccaro_add(b, &row_padded, &slice, c_in);
+            b.free(c_in);
+            b.free(pad);
+        } else if safe_reuse {
+            let need = row.len() - square_selfhost_gate_suffix_carries(row.len());
+            let avail = tmp_ext.len() - hi;
+            let from_tmp = need.min(avail);
+            let from_supplement = (need - from_tmp).min(clean_supplement.len());
+            let from_global = need - from_tmp - from_supplement;
+            let gpool = b.alloc_qubits(from_global);
+            let mut carries: Vec<QubitId> = tmp_ext[hi..hi + from_tmp].to_vec();
+            carries.extend_from_slice(&clean_supplement[..from_supplement]);
+            carries.extend_from_slice(&gpool);
+            cuccaro_add_fast_low_to_ext_borrowed_carries_no_cin(b, &row, &slice, &carries);
+            b.free_vec(&gpool);
+        } else {
+            let pad = b.alloc_qubit();
+            let mut row_padded = row.clone();
+            row_padded.push(pad);
+            let c_in = b.alloc_qubit();
+            let need = row_padded.len() - 1;
+            let avail = tmp_ext.len() - hi;
+            let from_tmp = need.min(avail);
+            let from_global = need - from_tmp;
+            let gpool = b.alloc_qubits(from_global);
+            let mut carries: Vec<QubitId> = tmp_ext[hi..hi + from_tmp].to_vec();
+            carries.extend_from_slice(&gpool);
+            cuccaro_add_fast_borrowed_carries(b, &row_padded, &slice, c_in, &carries);
+            b.free(c_in);
+            b.free_vec(&gpool);
+            b.free(pad);
+        }
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            let m = b.alloc_bit();
+            b.hmr(row[k + 2], m);
+            b.cz_if(x[i], x[i + 1 + k], m);
+        }
+        b.free_vec(&row);
+    }
+}
+
+pub(crate) fn schoolbook_square_symmetric_lowq_selfhosted_inverse_with_clean_supplement(
+    b: &mut B,
+    x: &[QubitId],
+    tmp_ext: &[QubitId],
+    clean_supplement: &[QubitId],
+) {
+    let n = x.len();
+    debug_assert_eq!(tmp_ext.len(), 2 * n);
+    let safe_reuse = square_selfhost_safe_lane_reuse_enabled();
+    if safe_reuse {
+        assert_qubit_slices_disjoint(&[x, tmp_ext, clean_supplement]);
+    }
+    let gate_prefix_rows = std::env::var("SQUARE_SELFHOST_GATE_PREFIX_ROWS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    for i in (0..n).rev() {
+        let width = if i == n - 1 { 1 } else { n - i + 1 };
+        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
+        let row = b.alloc_qubits(width);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
+        }
+        let hi = 2 * i + width + 1;
+        let slice: Vec<QubitId> = tmp_ext[2 * i..hi].to_vec();
+        if i < gate_prefix_rows {
+            let pad = b.alloc_qubit();
+            let mut row_padded = row.clone();
+            row_padded.push(pad);
+            let c_in = b.alloc_qubit();
+            cuccaro_sub(b, &row_padded, &slice, c_in);
+            b.free(c_in);
+            b.free(pad);
+        } else if safe_reuse {
+            let need = row.len() - square_selfhost_gate_suffix_carries(row.len());
+            let avail = tmp_ext.len() - hi;
+            let from_tmp = need.min(avail);
+            let from_supplement = (need - from_tmp).min(clean_supplement.len());
+            let from_global = need - from_tmp - from_supplement;
+            let gpool = b.alloc_qubits(from_global);
+            let mut carries: Vec<QubitId> = tmp_ext[hi..hi + from_tmp].to_vec();
+            carries.extend_from_slice(&clean_supplement[..from_supplement]);
+            carries.extend_from_slice(&gpool);
+            cuccaro_sub_fast_low_to_ext_borrowed_carries_no_cin(b, &row, &slice, &carries);
+            b.free_vec(&gpool);
+        } else {
+            let pad = b.alloc_qubit();
+            let mut row_padded = row.clone();
+            row_padded.push(pad);
+            let c_in = b.alloc_qubit();
+            let need = row_padded.len() - 1;
+            let avail = tmp_ext.len() - hi;
+            let from_tmp = need.min(avail);
+            let from_global = need - from_tmp;
+            let gpool = b.alloc_qubits(from_global);
+            let mut carries: Vec<QubitId> = tmp_ext[hi..hi + from_tmp].to_vec();
+            carries.extend_from_slice(&gpool);
+            cuccaro_sub_fast_borrowed_carries(b, &row_padded, &slice, c_in, &carries);
+            b.free(c_in);
+            b.free_vec(&gpool);
+            b.free(pad);
+        }
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            let m = b.alloc_bit();
+            b.hmr(row[k + 2], m);
+            b.cz_if(x[i], x[i + 1 + k], m);
+        }
+        b.free_vec(&row);
+    }
+}
+
+pub(crate) fn square_selfhost_gate_suffix_carries(n: usize) -> usize {
+    std::env::var("SQUARE_SELFHOST_GATE_SUFFIX_CARRIES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(n.saturating_sub(1))
+}
+
+/// Experimental square-only reclaim.  This is deliberately opt-in: every lane
+/// borrowed by the prototype is either an untouched high tail of the square
+/// accumulator, a caller-proved square bit that is exactly zero, or a clean
+/// sibling square destination.  Dirty-but-idle data and operand aliases are not
+/// eligible.
+pub(crate) fn square_selfhost_safe_lane_reuse_enabled() -> bool {
+    std::env::var("SQUARE_SELFHOST_SAFE_LANE_REUSE")
+        .ok()
+        .as_deref()
+        == Some("1")
 }
