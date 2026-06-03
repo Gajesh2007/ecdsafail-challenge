@@ -1,8 +1,3 @@
-//! Arithmetic against compile-time constants.
-//!
-//! Adds / subtracts a known constant into a quantum register: unconditional,
-//! controlled, measurement-"fast", and direct / truncated specializations that
-//! avoid materializing the constant in a scratch register.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]

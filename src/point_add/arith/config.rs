@@ -1,42 +1,11 @@
-//! Runtime feature gates read from environment variables.
-//!
-//! Toggles for Solinas direct-constant arithmetic, carry-truncation windows,
-//! low-qubit shift mode, and the D1 phase-corrected product core — used to A/B
-//! optimization paths without recompiling.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
 use super::*;
 
 
-pub(crate) fn d1_phase_corrected_arith_core_enabled() -> bool {
-    std::env::var(D1_PHASE_CORRECTED_ARITH_CORE_ENV)
-        .ok()
-        .as_deref()
-        == Some("1")
-}
-
 pub(crate) fn d1_phase_corrected_product_core_active() -> bool {
     D1_PHASE_CORRECTED_PRODUCT_CORE_SCOPE.with(|scope| scope.get())
-}
-
-pub(crate) fn with_d1_phase_corrected_product_core<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
-    if !enabled {
-        return f();
-    }
-    D1_PHASE_CORRECTED_PRODUCT_CORE_SCOPE.with(|scope| {
-        let old = scope.replace(true);
-        let out = f();
-        scope.set(old);
-        out
-    })
-}
-
-pub(crate) fn env_flag_enabled(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|v| v != "0" && v.to_ascii_lowercase() != "false")
-        .unwrap_or(default)
 }
 
 pub(crate) fn direct_const_walks_enabled() -> bool {

@@ -1,4 +1,3 @@
-//! `modular::misc` — verbatim split of the original `modular` module.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]

@@ -1,8 +1,8 @@
-//! `modular::sub` — verbatim split of the original `modular` module.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
 use super::*;
+use crate::point_add::venting;
 
 pub(crate) fn mod_sub_qq(b: &mut B, acc: &[QubitId], a: &[QubitId], p: U256) {
     // mod_add_qq is a bijection on (acc, a): (acc, a) ↦ (acc + a mod p, a).
@@ -149,11 +149,5 @@ pub(crate) fn mod_sub_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
     // acc -= bits mod p. Uses fast mod_sub_qq via neg+add+neg.
     let a = load_bits(b, bits);
     mod_sub_qq_fast(b, acc, &a, p);
-    unload_bits(b, &a, bits);
-}
-
-pub(crate) fn mod_sub_qb_phase_clean(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
-    let a = load_bits(b, bits);
-    mod_sub_qq(b, acc, &a, p);
     unload_bits(b, &a, bits);
 }

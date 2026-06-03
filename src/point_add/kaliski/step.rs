@@ -1,4 +1,3 @@
-//! `kaliski::step` — verbatim split of the original `kaliski` module.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]

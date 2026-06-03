@@ -1,74 +1,27 @@
-//! Reversible secp256k1 point addition circuit.
+//! secp256k1 reversible point addition — `(target_x, target_y) += classical
+//! (offset_x, offset_y)`. Entry point: [`build`] → `build_builder` →
+//! `emit_dialog_gcd_raw_pa`. Score = round(avg executed Toffoli) × peak qubits.
 //!
-//! THE editable file for the research loop. Everything else in `src/` is
-//! stable harness; all circuit construction lives here.
+//! Module map (live dialog-GCD architecture):
+//! - `arith/`            reversible arithmetic primitives
+//!     - `adder/`        Cuccaro / MAJ-UMA ripple-carry + n-bit/const adders
+//!     - `modular/`      mod add/sub/neg/double/halve/scale (Solinas-reduced)
+//!     - `multiply/`     karatsuba, schoolbook, squaring, cores
+//!     - `compare`,`shift_ctrl`,`registers`,`const_arith`,`config`
+//!     - `util`          env defaults — `configure_ecdsafail_submission_route`
+//! - `rounds/dialog/`    THE live point-add
+//!     - `raw`           `emit_dialog_gcd_raw_pa` — top-level driver
+//!     - `compressed`    compressed-sidecar tobitvector / ipmul / quotient
+//!                       block lifecycles (+ host-reverse-raw-block)
+//!     - `apply`         chunked controlled add/sub into ext (`*_chunked_low_to_ext`)
+//!     - `compressor`    sidecar (de)compression
+//! - `kaliski/`          GCD step / coeff helpers shared by the dialog core
+//! - `emit`              `emit_inverse` reverse-scope scaffolding
+//! - `venting`           Gidney measured-uncompute ("venting") adders
+//! - `protocol/`, `rounds/{low,high}`  remaining route glue
 //!
-//! This circuit is specialized to secp256k1. The curve parameters
-//!   p = 2^256 - 2^32 - 977
-//!   a = 0, b = 7
-//! are hard-coded. Specialization lets later optimization passes exploit
-//! the Solinas structure of p (sparse low word, mostly-ones upper words)
-//! for faster modular reduction. Generalizing is an explicit non-goal.
-//!
-//! # Interface
-//! `build(b)` allocates four 256-wide registers in declaration order —
-//! target_x (qubits), target_y (qubits), offset_x (bits), offset_y (bits)
-//! — and emits gates that mutate the target registers into (P + Q) where
-//! P is the quantum point in targets and Q is the classical point in
-//! offsets. The harness validates against `WeierstrassEllipticCurve::add`.
-//!
-//! # Algorithm
-//! Standard affine addition with Roetteler-style two-Kaliski uncomputation:
-//!
-//!   1. Px -= Qx,  Py -= Qy          (register now holds dx, dy)
-//!   2. kaliski_inv_inplace(Px)       (Px ← dx^{-1})
-//!   3. lam += Py * Px                (lam ← (dy)(dx^{-1}) = λ)
-//!   4. kaliski_inv_inplace(Px)       (Px ← dx)
-//!   5. Py -= lam * Px                (Py ← 0)
-//!   6. Px -= lam*lam                 (Px ← dx - λ²)
-//!   7. Px ← -Px                      (Px ← λ² - dx)
-//!   8. Px -= 2*Qx                    (Px ← λ² - Px_orig - Qx = Rx)
-//!   9. Py += lam * Qx                (Py ← λ·Qx)
-//!  10. Py -= lam * Px                (Py ← λ·Qx - λ·Rx)
-//!  11. Py -= Qy                      (Py ← Ry, via the identity
-//!                                      Ry = λ(Qx - Rx) - Qy)
-//!  12. Uncompute lam via the inverse path using the (Rx, Ry) state.
-//!
-//! Step 12 in detail (uses the identity λ = (Qy + Ry) / (Qx - Rx)):
-//!     a. Px -= Qx; Px ← -Px            (Px ← Qx - Rx)
-//!     b. kaliski_inv_inplace(Px)       (Px ← (Qx - Rx)^{-1})
-//!     c. lam -= Py * Px                (lam -= Ry / (Qx - Rx))
-//!     d. lam -= Qy * Px                (lam -= Qy / (Qx - Rx))
-//!                                        → lam = 0
-//!     e. kaliski_inv_inplace(Px)       (Px ← Qx - Rx)
-//!     f. Px ← -Px; Px += Qx            (Px ← Rx)
-//!
-//! # Primitive layer
-//! All modular arithmetic is built on a single Cuccaro ripple-carry
-//! adder operating on `(n+1)`-wide extended registers. Subtract =
-//! forward complement + add + back complement. Modular reduction
-//! after add/sub is: (cond-sub p) + (cond-add p) controlled by the
-//! resulting sign bit.
-//!
-//! # Current status
-//! First-pass baseline: correctness-first, no optimization. Kaliski is
-//! implemented as the textbook binary almost-inverse (2n iterations).
-//! Expected gate counts far exceed zenodo's targets; the research loop
-//! reduces them.
-//!
-//! # Module layout
-//! This file retains the shared types (`B`, snapshots, state structs), the
-//! `impl B` gate API, the curve constants, the `build*` entry points, and the
-//! test modules. All free helper functions were extracted verbatim (pure
-//! structural refactor — emitted gates are byte-identical) into focused
-//! submodules, re-exported here so call sites are unchanged:
-//!
-//! - [`arith`]    — reversible field-arithmetic primitives (adder, modular, multiply, …)
-//! - [`kaliski`]  — Kaliski binary almost-inverse (modular inversion)
-//! - [`emit`]     — generic reversible gate-stream inversion (`emit_inverse`, `conjugate`)
-//! - [`protocol`] — top-level affine point-addition assemblies
-//! - [`rounds`]   — experimental per-round circuit builders from the research loop
-//! - [`bench`]    — benchmark / experiment scaffolds (outside the scored path)
+//! This tree is the byte-identical (ops.bin) equivalent of the accepted
+//! upstream best; all dead alternative architectures were purged.
 
 use alloy_primitives::U256;
 
@@ -83,63 +36,30 @@ use crate::sim::Simulator;
 
 use crate::weierstrass_elliptic_curve::WeierstrassEllipticCurve;
 
-pub mod by;
 
-#[cfg(test)]
-pub mod coset_proto;
 
-pub mod fermat_inv;
 
-pub mod halfgcd_coeff_decoder;
 
-pub mod halfgcd_live_pa;
 
-pub mod kaliski_classical_replay;
 
-pub mod kaliski_equiv;
 
-pub mod kaliski_jump;
 
-#[cfg(test)]
-pub mod kaliski_linear_transform;
 
-#[cfg(test)]
-pub mod kim_inv_circuit;
 
-#[cfg(test)]
-pub mod kim_proto;
 
-#[cfg(test)]
-pub mod luo_proto;
 
-pub mod microbench;
 
-#[cfg(test)]
-pub mod primitive_costs;
 
-pub mod round125_jsf;
 
-pub mod round158_halfgcd_splice_live;
 
-pub mod round185_halfgcd_fixed_depth64_pa;
 
-pub mod round218_b5_program;
 
-pub mod round218_b5_selector;
 
-pub mod round218_b5_transport;
 
-#[cfg(test)]
-pub mod scratch600_frontier;
 
-#[cfg(test)]
-pub mod single_inv_numeric;
 
-pub mod source_live_d1;
 
-pub mod test_timeout;
 
-pub mod unconditional_kal;
 
 pub mod venting;
 
@@ -149,13 +69,11 @@ mod emit;
 mod protocol;
 mod arith;
 mod kaliski;
-mod bench;
 mod rounds;
 pub use emit::*;
 pub use protocol::*;
 pub use arith::*;
 pub use kaliski::*;
-pub use bench::*;
 pub use rounds::*;
 
 
@@ -1451,139 +1369,6 @@ pub const ROUND146_HALFGCD_DECODER_SEQUENCE_BENCH_ENV: &str =
 fn build_builder() -> B {
     configure_ecdsafail_submission_route();
 
-    if round185_halfgcd_fixed_depth64_pa::round185_fixed_depth64_halfgcd_pa_enabled() {
-        return builder_from_ops(
-            round185_halfgcd_fixed_depth64_pa::build_round185_halfgcd_fixed_depth64_google_abi_pa(),
-        );
-    }
-
-    if round556_shifted_source_row_bench_enabled() {
-        let width = round556_shifted_source_row_width_from_env();
-        let q_bits = round556_shifted_source_row_qbits_from_env(width);
-        return builder_from_ops(build_round556_shifted_source_row_component(width, q_bits));
-    }
-
-    if direct_centered_branch_sidecar_bench_enabled() {
-        return builder_from_ops(build_direct_centered_branch_sidecar_bench());
-    }
-
-    if direct_centered_branch_retained_finalizer_bench_enabled() {
-        return builder_from_ops(build_direct_centered_branch_retained_finalizer_bench());
-    }
-
-    if direct_centered_branch_digit_clean_fit_bench_enabled() {
-        return builder_from_ops(build_direct_centered_branch_digit_clean_fit_bench());
-    }
-
-    if direct_centered_branch_replay_finalizer_fit_bench_enabled() {
-        return builder_from_ops(build_direct_centered_branch_replay_finalizer_fit_bench());
-    }
-
-    if direct_centered_branch_predicate_step_fit_bench_enabled() {
-        return builder_from_ops(build_direct_centered_branch_predicate_step_fit_bench());
-    }
-
-    if direct_centered_qlow_lowp_branch_row_fit_bench_enabled() {
-        let q_bits = direct_centered_qlow_lowp_branch_row_q_bits_from_env();
-        return builder_from_ops(build_direct_centered_qlow_lowpath_branch_row_fit_bench(
-            q_bits,
-        ));
-    }
-
-    if direct_centered_qlow_lowp_branch_digit_row_fit_bench_enabled() {
-        let q_bits = direct_centered_qlow_lowp_branch_row_q_bits_from_env();
-        return builder_from_ops(
-            build_direct_centered_qlow_lowpath_branch_digit_row_fit_bench(q_bits),
-        );
-    }
-
-    if direct_centered_shifted_source_qbit_row_fit_bench_enabled() {
-        let q_bits = direct_centered_qlow_lowp_branch_row_q_bits_from_env();
-        return builder_from_ops(build_direct_centered_shifted_source_qbit_row_fit_bench(
-            q_bits,
-        ));
-    }
-
-    if direct_centered_row_transition_fit_bench_enabled() {
-        return builder_from_ops(build_direct_centered_row_transition_fit_bench());
-    }
-
-    if direct_centered_predicate_replay_finalizer_fit_bench_enabled() {
-        return builder_from_ops(build_direct_centered_predicate_replay_finalizer_fit_bench());
-    }
-
-    if direct_centered_inline_predicate_finalizer_delta_fit_bench_enabled() {
-        return builder_from_ops(
-            build_direct_centered_inline_predicate_finalizer_delta_fit_bench(),
-        );
-    }
-
-    if direct_centered_binary_trie_qrom_bench_enabled() {
-        let address_bits = direct_centered_binary_trie_qrom_address_bits_from_env();
-        let row_count = direct_centered_binary_trie_qrom_rows_from_env(address_bits);
-        let target_bits = direct_centered_binary_trie_qrom_target_bits_from_env();
-        return builder_from_ops(build_direct_centered_binary_trie_qrom_bench(
-            row_count,
-            address_bits,
-            target_bits,
-        ));
-    }
-
-    if direct_centered_binary_trie_qrom_roundtrip_bench_enabled() {
-        let address_bits = direct_centered_binary_trie_qrom_address_bits_from_env();
-        let row_count = direct_centered_binary_trie_qrom_rows_from_env(address_bits);
-        let target_bits = direct_centered_binary_trie_qrom_target_bits_from_env();
-        return builder_from_ops(build_direct_centered_binary_trie_qrom_roundtrip_bench(
-            row_count,
-            address_bits,
-            target_bits,
-        ));
-    }
-
-    if dialog_gcd_raw_apply_fit_bench_enabled() {
-        return builder_from_ops(build_dialog_gcd_raw_apply_fit_bench());
-    }
-
-    if dialog_gcd_raw_tobitvector_fit_bench_enabled() {
-        return builder_from_ops(build_dialog_gcd_raw_tobitvector_fit_bench());
-    }
-
-    if dialog_gcd_raw_ipmul_fit_bench_enabled() {
-        return builder_from_ops(build_dialog_gcd_raw_ipmul_fit_bench());
-    }
-
-    if dialog_gcd_compressed_block_primitive_fit_bench_enabled() {
-        return builder_from_ops(build_dialog_gcd_compressed_block_primitive_fit_bench());
-    }
-
-    if dialog_gcd_high_tail_alias_fit_bench_enabled() {
-        return build_dialog_gcd_high_tail_alias_fit_bench_builder();
-    }
-
-    if dialog_gcd_high_tail_transcript_overhead_bench_enabled() {
-        return build_dialog_gcd_high_tail_transcript_overhead_bench_builder();
-    }
-
-    if direct_centered_sidecar_finalizer_fit_bench_enabled() {
-        return builder_from_ops(build_direct_centered_sidecar_finalizer_fit_bench());
-    }
-
-    if direct_centered_sidecar_fast_finalizer_fit_bench_enabled() {
-        return builder_from_ops(build_direct_centered_sidecar_fast_finalizer_fit_bench());
-    }
-
-    if round146_halfgcd_decoder_sequence_bench_enabled() {
-        return builder_from_ops(build_round146_halfgcd_decoder_sequence_bench());
-    }
-
-    if round146_halfgcd_decoder_reuse_bench_enabled() {
-        return builder_from_ops(build_round146_halfgcd_decoder_reuse_bench());
-    }
-
-    if round125_jsf_operator_bench_enabled() {
-        return builder_from_ops(build_round125_jsf_operator_bench());
-    }
-
     let mut builder = if std::env::var("POINT_ADD_COUNT_ONLY").ok().as_deref() == Some("1") {
         B::new_count_only()
     } else {
@@ -1638,89 +1423,7 @@ fn build_builder() -> B {
         }
     }
 
-    let route_transport = round218_b5_source_live_transport_pa_enabled();
-    let route_history = round218_b5_history_stream_pa_enabled();
-    let route_one_inv = one_inv_dx3_affine_pa_enabled();
-    let route_pair1_pair2 = round181_d1_pair1_pair2_pa_enabled();
-    let route_round495_product = round495_d1_source_live_product_tail_pa_enabled();
-    let route_round495_cubic = round495_d1_source_live_cubic_tail_pa_enabled();
-    let route_round691_polarized_generic = round691_polarized_generic_scale_p_pa_enabled();
-    if route_transport {
-        round218_b5_transport::emit_round218_b5_source_live_transport_pa_or_fail(
-            b, &tx, &ty, &ox, &oy, p,
-        );
-    } else if round218_b5_history_stream_pa_enabled() {
-        emit_round218_b5_history_stream_pa(b, &tx, &ty, &ox, &oy, p);
-    } else if one_inv_dx3_affine_pa_enabled() {
-        build_one_inv_dx3_affine_pa_or_break(b, &tx, &ty, &ox, &oy, p);
-    } else if round181_d1_pair1_pair2_pa_enabled() {
-        emit_round181_d1_pair1_pair2_pa(b, &tx, &ty, &ox, &oy, p);
-    } else if route_round495_product {
-        assert!(
-            !route_round495_cubic,
-            "select only one Round495 D1 source-live tail route"
-        );
-        emit_round495_d1_source_live_product_tail_pa(b, &tx, &ty, &ox, &oy, p);
-    } else if route_round495_cubic {
-        emit_round495_d1_source_live_cubic_tail_pa(b, &tx, &ty, &ox, &oy, p);
-    } else if route_round691_polarized_generic {
-        emit_round691_polarized_generic_scale_p_pa(b, &tx, &ty, &ox, &oy, p);
-    } else if dialog_gcd_raw_pa_enabled() {
-        emit_dialog_gcd_raw_pa(b, &tx, &ty, &ox, &oy, p);
-    } else if std::env::var("COMPACT_POINT_ADD").ok().as_deref() == Some("1") {
-        build_compact_point_add(b, &tx, &ty, &ox, &oy, p);
-    } else {
-        build_standard_point_add(b, &tx, &ty, &ox, &oy, p);
-    }
-
-    if std::env::var("BY_REPLAY_BENCH_SCAFFOLD").ok().as_deref() == Some("1") {
-        emit_scaled_by_pattern_replay_benchmark_scaffold(b, p);
-    }
-    if std::env::var("BY_CENTERED_REPLAY_BODY_BENCH")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        emit_centered_signed_by_replay_body_benchmark_scaffold(b, p);
-    }
-    if std::env::var("BY_CENTERED_CLEAN_ROUNDTRIP_BENCH")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        emit_centered_signed_by_clean_roundtrip_benchmark_scaffold(b, p);
-    }
-    if std::env::var("BY_CENTERED_FAST_CLEAN_ROUNDTRIP_BENCH")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        emit_centered_signed_by_fast_clean_roundtrip_benchmark_scaffold(b, p);
-    }
-    if std::env::var("BY_CENTERED_DENOM_CONTROLS_BENCH")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        emit_centered_by_denominator_derived_controls_benchmark_scaffold(b, &tx, p);
-    }
-    if std::env::var("BY_CENTERED_LIVE_NUM_BENCH").ok().as_deref() == Some("1") {
-        emit_centered_by_denom_controls_live_numerator_benchmark_scaffold(b, &tx, &ty, p);
-    }
-    if std::env::var("SINGLE_INV_STRATEGY_C_BENCH").ok().as_deref() == Some("1") {
-        emit_single_inv_strategy_c_shape_benchmark_scaffold(b, p);
-    }
-    if std::env::var("CENTERED_RESTORING_QBIT_BENCH")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        emit_centered_restoring_qbit_benchmark_scaffold(b);
-    }
-
-    if std::env::var("BY_TEST").is_ok() {
-        by::run_classical_test();
-    }
+    emit_dialog_gcd_raw_pa(b, &tx, &ty, &ox, &oy, p);
 
     if !b.count_only && std::env::var("SKIP_ALT_SEED_CHECKS").ok().as_deref() != Some("1") {
         run_alt_seed_checks(&b.ops);

@@ -1,4 +1,3 @@
-//! `dialog::raw` — verbatim split of the original `dialog` module.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
@@ -86,10 +85,6 @@ pub(crate) fn dialog_gcd_raw_apply_truncated_clean_enabled() -> bool {
         .ok()
         .as_deref()
         == Some("1")
-}
-
-pub(crate) fn dialog_gcd_raw_pa_enabled() -> bool {
-    std::env::var(DIALOG_GCD_RAW_PA_ENV).ok().as_deref() == Some("1")
 }
 
 pub(crate) fn dialog_gcd_raw_pa_stop_after_quotient_enabled() -> bool {
@@ -226,27 +221,6 @@ pub(crate) fn emit_dialog_gcd_raw_tobitvector_steps_reverse(
         b.free(cmp);
         b.cx(v[0], b0);
     }
-}
-
-pub(crate) fn emit_dialog_gcd_raw_tobitvector(
-    b: &mut B,
-    v: &[QubitId],
-    dialog_log: &[QubitId],
-    p: U256,
-) -> Vec<QubitId> {
-    assert_eq!(v.len(), N);
-    assert!(dialog_log.len() >= 2 * dialog_gcd_active_iterations());
-
-    let u = b.alloc_qubits(N);
-    b.set_phase("dialog_gcd_raw_tobitvector_load_p");
-    for i in 0..N {
-        if bit(p, i) {
-            b.x(u[i]);
-        }
-    }
-
-    emit_dialog_gcd_raw_tobitvector_steps(b, &u, v, dialog_log);
-    u
 }
 
 pub(crate) fn emit_dialog_gcd_raw_apply_bitvector(

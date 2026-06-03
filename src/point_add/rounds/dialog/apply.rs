@@ -1,8 +1,9 @@
-//! `dialog::misc1` — verbatim split of the original `dialog` module.
-
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
 use super::*;
+
+
+// ─── merged from misc1.rs ───
 
 pub(crate) fn dialog_gcd_apply_chunked_f_blocks() -> Option<usize> {
     std::env::var("DIALOG_GCD_APPLY_CHUNKED_F_BLOCKS")
@@ -207,10 +208,6 @@ pub(crate) fn dialog_gcd_partial_host_comparator_enabled() -> bool {
         != Some("0")
 }
 
-pub(crate) fn dialog_gcd_cmp_gt_truncated_into(b: &mut B, u: &[QubitId], v: &[QubitId], flag: QubitId) {
-    dialog_gcd_cmp_gt_truncated_into_width(b, u, v, flag, dialog_gcd_compare_bits().min(u.len()));
-}
-
 pub(crate) fn dialog_gcd_shift_right_assuming_even(b: &mut B, v: &[QubitId]) {
     assert!(!v.is_empty());
     for i in 0..v.len() - 1 {
@@ -257,12 +254,6 @@ pub(crate) fn dialog_gcd_tobitvector_active_width(step: usize) -> usize {
     rounded.clamp(1, N)
 }
 
-pub(crate) fn dialog_gcd_round762_active_width(step: usize) -> usize {
-    let ideal = N as f64 - (step as f64) * 0.5 * 1.415 + 37.0;
-    let rounded = ((ideal.max(1.0) / 2.0).ceil() as usize) * 2;
-    rounded.clamp(1, N)
-}
-
 /// Carry-tail truncation window for the materialized controlled sub/add BODY
 /// (and its gated LOAD). Default 0 (OFF). When `w > 0`, the controlled
 /// `acc -= ctrl·subtrahend` / `acc += ctrl·addend` only loads + ripples the
@@ -282,125 +273,6 @@ pub(crate) fn dialog_gcd_body_carry_trunc_width(active_width: usize) -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
     active_width.saturating_sub(w).max(2)
-}
-
-pub(crate) fn dialog_gcd_high_tail_ordered_cells() -> Vec<DialogGcdHighTailCell> {
-    let mut cells = Vec::with_capacity(
-        DIALOG_GCD_HIGH_TAIL_ALIAS_EXTENSION_BITS + DIALOG_GCD_HIGH_TAIL_ALIAS_EXTENDED_BITS,
-    );
-    for pos in (0..DIALOG_GCD_HIGH_TAIL_ALIAS_EXTENDED_BITS).rev() {
-        if pos >= N {
-            cells.push(DialogGcdHighTailCell {
-                lane: DialogGcdHighTailLane::U,
-                pos,
-            });
-        }
-        cells.push(DialogGcdHighTailCell {
-            lane: DialogGcdHighTailLane::V,
-            pos,
-        });
-    }
-    cells
-}
-
-pub(crate) fn dialog_gcd_high_tail_cell_index(cell: DialogGcdHighTailCell) -> usize {
-    match cell.lane {
-        DialogGcdHighTailLane::U => cell.pos,
-        DialogGcdHighTailLane::V => DIALOG_GCD_HIGH_TAIL_ALIAS_EXTENDED_BITS + cell.pos,
-    }
-}
-
-pub(crate) fn dialog_gcd_high_tail_alias_layout() -> DialogGcdHighTailLayout {
-    let ordered = dialog_gcd_high_tail_ordered_cells();
-    let mut used = vec![false; 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_EXTENDED_BITS];
-    let mut blocks = Vec::with_capacity(DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCKS);
-
-    for group in 0..DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCKS {
-        let first_step = group * DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE;
-        let last_step = (first_step + DIALOG_GCD_HIGH_TAIL_ALIAS_GROUP_SIZE - 1)
-            .min(DIALOG_GCD_HIGH_TAIL_ALIAS_ITERATIONS - 1);
-        let active_threshold = (first_step..=last_step)
-            .map(dialog_gcd_round762_active_width)
-            .max()
-            .unwrap();
-        let mut selected = Vec::with_capacity(DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS);
-        for &cell in &ordered {
-            let index = dialog_gcd_high_tail_cell_index(cell);
-            if used[index] || cell.pos < active_threshold {
-                continue;
-            }
-            selected.push(cell);
-            if selected.len() == DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS {
-                break;
-            }
-        }
-        assert_eq!(
-            selected.len(),
-            DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS,
-            "Round762 high-tail log cannot place group {group}"
-        );
-        let cells: [DialogGcdHighTailCell; DIALOG_GCD_HIGH_TAIL_ALIAS_BLOCK_BITS] =
-            selected.try_into().unwrap();
-        for &cell in &cells {
-            used[dialog_gcd_high_tail_cell_index(cell)] = true;
-        }
-        blocks.push(DialogGcdHighTailBlock {
-            group,
-            first_step,
-            last_step,
-            active_threshold,
-            cells,
-        });
-    }
-
-    let mut u_log_cells = 0usize;
-    let mut v_log_cells = 0usize;
-    let mut min_v_index_used = usize::MAX;
-    let mut max_v_index_used = 0usize;
-    for block in &blocks {
-        for &cell in &block.cells {
-            assert!(
-                cell.pos >= block.active_threshold,
-                "Round762 log cell overlaps active window: {:?}",
-                cell
-            );
-            match cell.lane {
-                DialogGcdHighTailLane::U => {
-                    assert!(
-                        cell.pos >= N,
-                        "Round762 transcript may not use true u[0..255]"
-                    );
-                    u_log_cells += 1;
-                }
-                DialogGcdHighTailLane::V => {
-                    v_log_cells += 1;
-                    min_v_index_used = min_v_index_used.min(cell.pos);
-                    max_v_index_used = max_v_index_used.max(cell.pos);
-                }
-            }
-        }
-    }
-
-    let projected_q = DIALOG_GCD_HIGH_TAIL_ALIAS_RAW_REPAIRED_Q - DIALOG_GCD_RAW_LOG_BITS
-        + 2 * DIALOG_GCD_HIGH_TAIL_ALIAS_EXTENSION_BITS;
-    let projected_q_times_t = projected_q * DIALOG_GCD_HIGH_TAIL_ALIAS_RAW_REPAIRED_T;
-
-    let layout = DialogGcdHighTailLayout {
-        blocks,
-        u_log_cells,
-        v_log_cells,
-        min_v_index_used,
-        max_v_index_used,
-        true_u_borrow_width: N,
-        projected_q,
-        projected_t: DIALOG_GCD_HIGH_TAIL_ALIAS_RAW_REPAIRED_T,
-        projected_q_times_t,
-    };
-    assert!(
-        layout.check_passed(),
-        "Round762 high-tail alias layout failed"
-    );
-    layout
 }
 
 pub(crate) fn dialog_gcd_host_gated_enabled() -> bool {
@@ -820,4 +692,355 @@ pub(crate) fn dialog_gcd_chunk_hi(blocks: usize, block: usize, ext_n: usize) -> 
             .min(ext_n - 1);
     }
     ((block + 1) * ext_n) / blocks
+}
+
+// ─── merged from misc2.rs ───
+
+pub(crate) fn dialog_gcd_add_ctrl_chunked_low_to_ext(
+    b: &mut B,
+    source: &[QubitId],
+    acc_ext: &[QubitId],
+    ctrl: QubitId,
+    c_in: QubitId,
+    blocks: usize,
+) {
+    let n = source.len();
+    assert_eq!(acc_ext.len(), n + 1);
+    let ext_n = acc_ext.len();
+    let blocks = blocks.max(2).min(ext_n);
+    let mut carry = c_in;
+    let mut lo = 0usize;
+    let mut couts: Vec<(QubitId, usize)> = Vec::new();
+
+    for blk in 0..blocks {
+        let hi = dialog_gcd_chunk_hi(blocks, blk, ext_n);
+        if hi <= lo {
+            continue;
+        }
+        if blk == blocks - 1 || hi == ext_n {
+            let f = dialog_gcd_load_controlled_slice(b, ctrl, source, lo.min(n), n);
+            cuccaro_add_fast_low_to_ext(b, &f, &acc_ext[lo..hi], carry);
+            dialog_gcd_clear_controlled_slice_hmr(b, ctrl, source, lo.min(n), &f);
+            b.free_vec(&f);
+            break;
+        }
+
+        assert!(hi <= n);
+        let f = dialog_gcd_load_controlled_slice(b, ctrl, source, lo, hi);
+        let owned_zero = if carry == c_in || !dialog_gcd_apply_chunked_f_reuse_cin_zero_enabled() {
+            Some(b.alloc_qubit())
+        } else {
+            None
+        };
+        let zero = owned_zero.unwrap_or(c_in);
+        let cout = b.alloc_qubit();
+        let mut a_block = f.clone();
+        a_block.push(zero);
+        let mut acc_block = acc_ext[lo..hi].to_vec();
+        acc_block.push(cout);
+        cuccaro_add_fast(b, &a_block, &acc_block, carry);
+        if let Some(zero) = owned_zero {
+            b.free(zero);
+        }
+        dialog_gcd_clear_controlled_slice_hmr(b, ctrl, source, lo, &f);
+        b.free_vec(&f);
+        couts.push((cout, hi));
+        carry = cout;
+        lo = hi;
+    }
+
+    if dialog_gcd_apply_chunked_f_fuse_boundary_clears_enabled() {
+        if let Some(&(_, p)) = couts.last() {
+            ccx_cmp_lt_into_fast_prefix_targets(
+                b,
+                &acc_ext[..p],
+                &source[..p],
+                ctrl,
+                &couts,
+            );
+        }
+    } else {
+        for &(cout, p) in couts.iter().rev() {
+            ccx_cmp_lt_into_fast(b, &acc_ext[..p], &source[..p], ctrl, cout);
+        }
+    }
+    for &(cout, _) in couts.iter().rev() {
+        b.free(cout);
+    }
+}
+
+pub(crate) fn dialog_gcd_sub_ctrl_chunked_low_to_ext(
+    b: &mut B,
+    source: &[QubitId],
+    acc_ext: &[QubitId],
+    ctrl: QubitId,
+    c_in: QubitId,
+    blocks: usize,
+) {
+    let n = source.len();
+    assert_eq!(acc_ext.len(), n + 1);
+    let ext_n = acc_ext.len();
+    let blocks = blocks.max(2).min(ext_n);
+    let mut borrow = c_in;
+    let mut lo = 0usize;
+    let mut bouts: Vec<(QubitId, usize)> = Vec::new();
+
+    for blk in 0..blocks {
+        let hi = dialog_gcd_chunk_hi(blocks, blk, ext_n);
+        if hi <= lo {
+            continue;
+        }
+        if blk == blocks - 1 || hi == ext_n {
+            let f = dialog_gcd_load_controlled_slice(b, ctrl, source, lo.min(n), n);
+            cuccaro_sub_fast_low_to_ext(b, &f, &acc_ext[lo..hi], borrow);
+            dialog_gcd_clear_controlled_slice_hmr(b, ctrl, source, lo.min(n), &f);
+            b.free_vec(&f);
+            break;
+        }
+
+        assert!(hi <= n);
+        let f = dialog_gcd_load_controlled_slice(b, ctrl, source, lo, hi);
+        let owned_zero = if borrow == c_in || !dialog_gcd_apply_chunked_f_reuse_cin_zero_enabled() {
+            Some(b.alloc_qubit())
+        } else {
+            None
+        };
+        let zero = owned_zero.unwrap_or(c_in);
+        let bout = b.alloc_qubit();
+        let mut a_block = f.clone();
+        a_block.push(zero);
+        let mut acc_block = acc_ext[lo..hi].to_vec();
+        acc_block.push(bout);
+        cuccaro_sub_fast(b, &a_block, &acc_block, borrow);
+        if let Some(zero) = owned_zero {
+            b.free(zero);
+        }
+        dialog_gcd_clear_controlled_slice_hmr(b, ctrl, source, lo, &f);
+        b.free_vec(&f);
+        bouts.push((bout, hi));
+        borrow = bout;
+        lo = hi;
+    }
+
+    if dialog_gcd_apply_chunked_f_fuse_boundary_clears_enabled() {
+        if let Some(&(_, p)) = bouts.last() {
+            for i in 0..p {
+                b.x(source[i]);
+            }
+            ccx_cmp_lt_into_fast_prefix_targets(
+                b,
+                &source[..p],
+                &acc_ext[..p],
+                ctrl,
+                &bouts,
+            );
+            for i in 0..p {
+                b.x(source[i]);
+            }
+        }
+    } else {
+        for &(bout, p) in bouts.iter().rev() {
+            for i in 0..p {
+                b.x(source[i]);
+            }
+            ccx_cmp_lt_into_fast(b, &source[..p], &acc_ext[..p], ctrl, bout);
+            for i in 0..p {
+                b.x(source[i]);
+            }
+        }
+    }
+    for &(bout, _) in bouts.iter().rev() {
+        b.free(bout);
+    }
+}
+
+pub(crate) fn dialog_gcd_cmod_add_materialized_pseudomersenne_chunked(
+    b: &mut B,
+    acc: &[QubitId],
+    a: &[QubitId],
+    ctrl: QubitId,
+    p: U256,
+    blocks: usize,
+) {
+    assert_eq!(acc.len(), N);
+    assert_eq!(a.len(), N);
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+    let c_in = b.alloc_qubit();
+
+    b.set_phase("dialog_gcd_materialized_special_chunked_raw_sum");
+    dialog_gcd_add_ctrl_chunked_low_to_ext(b, a, &acc_ext, ctrl, c_in, blocks);
+    b.free(c_in);
+
+    b.set_phase("dialog_gcd_materialized_special_overflow_fold");
+    if let Some(w) = fold_carry_trunc_window() {
+        cadd_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
+    } else {
+        cadd_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
+    }
+
+    b.set_phase("dialog_gcd_materialized_special_overflow_clean");
+    let compare_start = N - dialog_gcd_apply_clean_compare_bits();
+    ccx_cmp_lt_into_fast(b, &acc[compare_start..], &a[compare_start..], ctrl, acc_ovf);
+    unext_reg(b, acc_ovf);
+}
+
+pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_chunked(
+    b: &mut B,
+    acc: &[QubitId],
+    a: &[QubitId],
+    ctrl: QubitId,
+    p: U256,
+    blocks: usize,
+) {
+    assert_eq!(acc.len(), N);
+    assert_eq!(a.len(), N);
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+    let c_in = b.alloc_qubit();
+
+    b.set_phase("dialog_gcd_materialized_special_chunked_raw_difference");
+    dialog_gcd_sub_ctrl_chunked_low_to_ext(b, a, &acc_ext, ctrl, c_in, blocks);
+    b.free(c_in);
+
+    b.set_phase("dialog_gcd_materialized_special_underflow_fold");
+    if let Some(w) = fold_carry_trunc_window() {
+        csub_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
+    } else {
+        csub_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
+    }
+
+    b.set_phase("dialog_gcd_materialized_special_underflow_clean");
+    dialog_gcd_clean_truncated_underflow(b, acc, a, ctrl, acc_ovf);
+    unext_reg(b, acc_ovf);
+}
+
+pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne(
+    b: &mut B,
+    acc: &[QubitId],
+    a: &[QubitId],
+    ctrl: QubitId,
+    p: U256,
+) {
+    assert_eq!(acc.len(), N);
+    assert_eq!(a.len(), N);
+    if let Some(blocks) = dialog_gcd_apply_chunked_f_blocks()
+        .filter(|_| dialog_gcd_raw_apply_truncated_clean_enabled())
+        .filter(|_| dialog_gcd_measured_apply_sub_enabled())
+    {
+        dialog_gcd_cmod_sub_materialized_pseudomersenne_chunked(b, acc, a, ctrl, p, blocks);
+        return;
+    }
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
+
+    let f = b.alloc_qubits(N);
+    b.set_phase("dialog_gcd_materialized_special_load_subtrahend");
+    for i in 0..N {
+        b.ccx(ctrl, a[i], f[i]);
+    }
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+
+    b.set_phase("dialog_gcd_materialized_special_raw_difference");
+    if dialog_gcd_measured_apply_sub_enabled() {
+        // Measured (Gidney) difference: ~n Toffoli instead of the ~2n of the
+        // non-fast cuccaro_sub uncompute. Peak-safe: the symmetric apply ADD
+        // already runs cuccaro_add_fast with its carry lane in this same phase.
+        let c_in = b.alloc_qubit();
+        if let Some(w) = dialog_gcd_apply_window_blocks() {
+            cuccaro_sub_fast_windowed_low_to_ext(b, &f, &acc_ext, c_in, w);
+        } else {
+            let f_ovf = b.alloc_qubit();
+            let mut f_ext = f.clone();
+            f_ext.push(f_ovf);
+            cuccaro_sub_fast(b, &f_ext, &acc_ext, c_in);
+            b.free(f_ovf);
+        }
+        b.free(c_in);
+    } else {
+        let f_ovf = b.alloc_qubit();
+        let mut f_ext = f.clone();
+        f_ext.push(f_ovf);
+        sub_nbit_qq(b, &f_ext, &acc_ext);
+        b.free(f_ovf);
+    }
+
+    b.set_phase("dialog_gcd_materialized_special_underflow_fold");
+    if let Some(w) = fold_carry_trunc_window() {
+        csub_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
+    } else {
+        csub_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
+    }
+
+    b.set_phase("dialog_gcd_materialized_special_underflow_clean");
+    if dialog_gcd_raw_apply_truncated_clean_enabled() {
+        dialog_gcd_clean_truncated_underflow(b, acc, a, ctrl, acc_ovf);
+    } else {
+        b.x(acc_ovf);
+        mod_neg_inplace_fast(b, &f, p);
+        cmp_lt_into_fast(b, acc, &f, acc_ovf);
+        mod_neg_inplace_fast(b, &f, p);
+    }
+    unext_reg(b, acc_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_clear_subtrahend");
+    for i in 0..N {
+        let m = b.alloc_bit();
+        b.hmr(f[i], m);
+        b.cz_if(ctrl, a[i], m);
+    }
+    b.free_vec(&f);
+}
+
+pub(crate) fn dialog_gcd_cmod_sub_materialized_pseudomersenne_borrowed_subtrahend(
+    b: &mut B,
+    acc: &[QubitId],
+    a: &[QubitId],
+    ctrl: QubitId,
+    p: U256,
+    f: &[QubitId],
+) {
+    assert_eq!(acc.len(), N);
+    assert_eq!(a.len(), N);
+    assert_eq!(f.len(), N);
+    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1u64));
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_load_subtrahend");
+    for i in 0..N {
+        b.ccx(ctrl, a[i], f[i]);
+    }
+
+    let (acc_ext, acc_ovf) = ext_reg(b, acc);
+    let f_ovf = b.alloc_qubit();
+    let mut f_ext = f.to_vec();
+    f_ext.push(f_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_raw_difference");
+    sub_nbit_qq(b, &f_ext, &acc_ext);
+    b.free(f_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_underflow_fold");
+    if let Some(w) = fold_carry_trunc_window() {
+        csub_nbit_const_direct_trunc_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf, w);
+    } else {
+        csub_nbit_const_fast(b, &acc[..DIALOG_GCD_SPECIAL_ADD_LSBS], c, acc_ovf);
+    }
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_underflow_clean");
+    if dialog_gcd_raw_apply_truncated_clean_enabled() {
+        dialog_gcd_clean_truncated_underflow(b, acc, a, ctrl, acc_ovf);
+    } else {
+        b.x(acc_ovf);
+        mod_neg_inplace_fast(b, f, p);
+        cmp_lt_into_fast(b, acc, f, acc_ovf);
+        mod_neg_inplace_fast(b, f, p);
+    }
+    unext_reg(b, acc_ovf);
+
+    b.set_phase("dialog_gcd_materialized_special_borrowed_clear_subtrahend");
+    for i in (0..N).rev() {
+        b.ccx(ctrl, a[i], f[i]);
+    }
 }

@@ -1,4 +1,3 @@
-//! `kaliski::config` — verbatim split of the original `kaliski` module.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
@@ -9,23 +8,6 @@ pub(crate) fn r_small_threshold() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(R_SMALL_THRESHOLD)
-}
-
-pub(crate) fn unsafe_kaliski_iter_sweep_allowed() -> bool {
-    std::env::var(ALLOW_UNSAFE_KALISKI_ITER_SWEEP)
-        .ok()
-        .as_deref()
-        == Some("1")
-}
-
-pub(crate) fn checked_kaliski_iters(context: &str, env_name: &str, value: usize, min_safe: usize) -> usize {
-    if value < min_safe && !unsafe_kaliski_iter_sweep_allowed() {
-        panic!(
-            "{context}: {env_name}={value} is below the verified exact-fuzz Kaliski convergence boundary {min_safe}. \
-             Lower counts leave the terminal state nonconstant and are research-only; set {ALLOW_UNSAFE_KALISKI_ITER_SWEEP}=1 only for fail-closed diagnostics."
-        );
-    }
-    value
 }
 
 pub(crate) fn bulk_prefix_safe_iters() -> usize {
@@ -78,18 +60,4 @@ pub(crate) fn bulk_prefix_enabled() -> bool {
         Ok(v) => v != "0",
         Err(_) => true,
     }
-}
-
-pub(crate) fn bulk_backward_step4_truncated_vadd_enabled() -> bool {
-    match std::env::var("KAL_BULK_BK_STEP4_TRUNC_VADD") {
-        Ok(v) => v != "0",
-        Err(_) => true,
-    }
-}
-
-pub(crate) fn bulk_backward_step4_truncated_vadd_min_iter() -> usize {
-    std::env::var("KAL_BULK_BK_STEP4_TRUNC_VADD_MIN")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(257)
 }

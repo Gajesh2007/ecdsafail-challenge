@@ -1,8 +1,211 @@
-//! `multiply::schoolbook2` — verbatim split of the original `multiply` module.
-
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
 use super::*;
+
+
+// ─── merged from schoolbook1.rs ───
+
+/// Litinski 2024 add-subtract schoolbook: tmp_ext += x * y.
+///
+/// Precondition: tmp_ext has 2n bits and holds value A_in.
+/// Postcondition: tmp_ext holds A_in + x*y (mod 2^{2n}).
+pub(crate) fn schoolbook_mul_into_addsub(b: &mut B, x: &[QubitId], y: &[QubitId], tmp_ext: &[QubitId]) {
+    let n = x.len();
+    debug_assert_eq!(y.len(), n);
+    debug_assert_eq!(tmp_ext.len(), 2 * n);
+
+    // wide = [low, tmp_ext[0], ..., tmp_ext[2n-1]]  =  2n+1 bits.
+    // This treats the (2n+1)-bit number `wide` as Litinski's accumulator.
+    // After all ops, wide = 2*A_in_shifted + 2*x*y  (i.e. 2*(A_in + xy)).
+    // `/2 relabel` reads out xy at wide[1..2n+1] = tmp_ext.
+    //
+    // To add A_in into the 2*(A_in + xy) result correctly, we need to bring A_in
+    // in as `2*A_in` in wide. That is done pre-loop: swap tmp_ext values up one bit.
+    // But Litinski's derivation assumes A_in = 0. To support non-zero A_in we'd
+    // need to double tmp_ext at the start and halve at the end.
+    //
+    // Fortunately ALL call sites pass tmp_ext starting at 0 (fresh alloc), so we
+    // can just assume A_in = 0.
+    let low = b.alloc_qubit();
+    let mut wide: Vec<QubitId> = Vec::with_capacity(2 * n + 1);
+    wide.push(low);
+    wide.extend_from_slice(tmp_ext);
+
+    // n controlled add-subtracts (Litinski Fig 2b).
+    for k in 0..n {
+        let slice: Vec<QubitId> = wide[k..k + n + 1].to_vec();
+        controlled_add_subtract_fast(b, x, &slice, y[k]);
+    }
+
+    // Corrections:
+    //   Using y as ctrl and x as operand, the intermediate value is:
+    //     2xy + 2^{2n} - 2^n (x+y+1) + x
+    //   Target: 2xy. So apply +2^n(y+1) + 2^n*x - 2^{2n} - x.
+
+    // +2^n * (y + 1): (n+1)-bit add of y_ext (top=0) into wide[n..2n+1] with c_in=1.
+    {
+        let pad = b.alloc_qubit();
+        let mut y_ext = y.to_vec();
+        y_ext.push(pad);
+        let slice: Vec<QubitId> = wide[n..2 * n + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        b.x(c_in);
+        if kal_vent_modadd_enabled() {
+            cuccaro_add(b, &y_ext, &slice, c_in);
+        } else {
+            cuccaro_add_fast(b, &y_ext, &slice, c_in);
+        }
+        b.x(c_in);
+        b.free(c_in);
+        b.free(pad);
+    }
+
+    // -2^{2n}: toggle wide[2n].
+    b.x(wide[2 * n]);
+
+    // -x as full (2n+1)-bit sub. Use in-place cuccaro_sub (no carry ancillae) to
+    // keep peak qubits low during this otherwise-expensive full-width correction.
+    // Costs n-1 extra Toffoli vs cuccaro_sub_fast but saves 2n peak qubits.
+    {
+        let mut x_ext: Vec<QubitId> = x.to_vec();
+        while x_ext.len() < 2 * n + 1 {
+            x_ext.push(b.alloc_qubit());
+        }
+        let c_in = b.alloc_qubit();
+        cuccaro_sub(b, &x_ext, &wide, c_in);
+        b.free(c_in);
+        for _ in n..2 * n + 1 {
+            let q = x_ext.pop().unwrap();
+            b.free(q);
+        }
+    }
+
+    // +2^n * x: (n+1)-bit add of x_ext into wide[n..2n+1].
+    {
+        let pad = b.alloc_qubit();
+        let mut x_ext = x.to_vec();
+        x_ext.push(pad);
+        let slice: Vec<QubitId> = wide[n..2 * n + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        if kal_vent_modadd_enabled() {
+            cuccaro_add(b, &x_ext, &slice, c_in);
+        } else {
+            cuccaro_add_fast(b, &x_ext, &slice, c_in);
+        }
+        b.free(c_in);
+        b.free(pad);
+    }
+
+    // wide = 2xy. /2 relabel: xy is at wide[1..2n+1] = tmp_ext. wide[0]=low should be 0.
+    b.free(low);
+}
+
+/// Exact gate-level inverse of `schoolbook_mul_into_addsub`.
+pub(crate) fn schoolbook_mul_into_addsub_inverse(
+    b: &mut B,
+    x: &[QubitId],
+    y: &[QubitId],
+    tmp_ext: &[QubitId],
+) {
+    let n = x.len();
+    debug_assert_eq!(y.len(), n);
+    debug_assert_eq!(tmp_ext.len(), 2 * n);
+
+    let low = b.alloc_qubit();
+    let mut wide: Vec<QubitId> = Vec::with_capacity(2 * n + 1);
+    wide.push(low);
+    wide.extend_from_slice(tmp_ext);
+
+    // Reverse correction 4: sub x at bit n.
+    {
+        let pad = b.alloc_qubit();
+        let mut x_ext = x.to_vec();
+        x_ext.push(pad);
+        let slice: Vec<QubitId> = wide[n..2 * n + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        cuccaro_sub_fast(b, &x_ext, &slice, c_in);
+        b.free(c_in);
+        b.free(pad);
+    }
+    // Reverse correction 3 (sub x full-width): add x back with borrow propagation.
+    // Use in-place cuccaro_add (no carries) to keep peak low, matching forward.
+    {
+        let mut x_ext: Vec<QubitId> = x.to_vec();
+        while x_ext.len() < 2 * n + 1 {
+            x_ext.push(b.alloc_qubit());
+        }
+        let c_in = b.alloc_qubit();
+        cuccaro_add(b, &x_ext, &wide, c_in);
+        b.free(c_in);
+        for _ in n..2 * n + 1 {
+            let q = x_ext.pop().unwrap();
+            b.free(q);
+        }
+    }
+    // Reverse correction 2: toggle wide[2n].
+    b.x(wide[2 * n]);
+    // Reverse correction 1: sub (y+1) at bit n.
+    {
+        let pad = b.alloc_qubit();
+        let mut y_ext = y.to_vec();
+        y_ext.push(pad);
+        let slice: Vec<QubitId> = wide[n..2 * n + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        b.x(c_in);
+        cuccaro_sub_fast(b, &y_ext, &slice, c_in);
+        b.x(c_in);
+        b.free(c_in);
+        b.free(pad);
+    }
+    // Reverse n add-subtract rows.
+    for k in (0..n).rev() {
+        let slice: Vec<QubitId> = wide[k..k + n + 1].to_vec();
+        controlled_add_subtract_fast_inverse(b, x, &slice, y[k]);
+    }
+
+    b.free(low);
+}
+
+/// Symmetric schoolbook for squaring: x² = sum_i x[i]·2^(2i) + sum_{i<j} 2·x[i]·x[j]·2^(i+j).
+/// Each cross-product is computed ONCE (instead of twice in full schoolbook),
+/// halving the AND count + Cuccaro_add length. Saves ~130k CCX per squaring.
+///
+/// Row i layout (width n-i): bit 0 = diagonal x[i] at position 2i, bit 1 = 0
+/// (gap), bit k+2 = cross-product (x[i] AND x[i+1+k]) at position i+(i+1+k)+1.
+pub(crate) fn schoolbook_square_symmetric(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
+    let n = x.len();
+    debug_assert_eq!(tmp_ext.len(), 2 * n);
+    for i in 0..n {
+        // Width: bit 0 = diag at pos 2i, bit 1 = gap, bits 2..(n-i) = cross-
+        // products at positions 2i+2..i+n. Last bit index = n-i, so width = n-i+1.
+        // Edge case: i = n-1 has only the diagonal, width = 1.
+        let width = if i == n - 1 { 1 } else { n - i + 1 };
+        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
+        // num_cross = number of cross-products in this row = width - 2 when width >= 2.
+        let row = b.alloc_qubits(width);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
+        }
+        let pad = b.alloc_qubit();
+        let mut row_padded = row.clone();
+        row_padded.push(pad);
+        let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
+        let c_in = b.alloc_qubit();
+        cuccaro_add_fast(b, &row_padded, &slice, c_in);
+        b.free(c_in);
+        b.free(pad);
+        b.cx(x[i], row[0]);
+        for k in 0..num_cross {
+            let m = b.alloc_bit();
+            b.hmr(row[k + 2], m);
+            b.cz_if(x[i], x[i + 1 + k], m);
+        }
+        b.free_vec(&row);
+    }
+}
+
+// ─── merged from schoolbook2.rs ───
 
 pub(crate) fn schoolbook_square_symmetric_inverse(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
     let n = x.len();
@@ -28,59 +231,6 @@ pub(crate) fn schoolbook_square_symmetric_inverse(b: &mut B, x: &[QubitId], tmp_
             b.hmr(row[k + 2], m);
             b.cz_if(x[i], x[i + 1 + k], m);
         }
-        b.free_vec(&row);
-    }
-}
-
-pub(crate) fn schoolbook_square_symmetric_nohmr(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    debug_assert_eq!(tmp_ext.len(), 2 * n);
-    for i in 0..n {
-        let width = if i == n - 1 { 1 } else { n - i + 1 };
-        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
-        let row = b.alloc_qubits(width);
-        b.cx(x[i], row[0]);
-        for k in 0..num_cross {
-            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
-        }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
-        let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_add(b, &row_padded, &slice, c_in);
-        b.free(c_in);
-        b.free(pad);
-        for k in (0..num_cross).rev() {
-            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
-        }
-        b.cx(x[i], row[0]);
-        b.free_vec(&row);
-    }
-}
-
-pub(crate) fn schoolbook_square_symmetric_nohmr_inverse(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    for i in (0..n).rev() {
-        let width = if i == n - 1 { 1 } else { n - i + 1 };
-        let num_cross = if i + 1 < n { n - i - 1 } else { 0 };
-        let row = b.alloc_qubits(width);
-        b.cx(x[i], row[0]);
-        for k in 0..num_cross {
-            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
-        }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
-        let slice: Vec<QubitId> = tmp_ext[2 * i..2 * i + width + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_sub(b, &row_padded, &slice, c_in);
-        b.free(c_in);
-        b.free(pad);
-        for k in (0..num_cross).rev() {
-            b.ccx(x[i], x[i + 1 + k], row[k + 2]);
-        }
-        b.cx(x[i], row[0]);
         b.free_vec(&row);
     }
 }
@@ -294,119 +444,6 @@ pub(crate) fn xtail_sq_selfhost_enabled() -> bool {
 }
 
 /// Schoolbook squarer with Bennett uncompute. For squaring `tmp_ext = x*x`
-/// (2n bits, no mod reduction), then ADD with Solinas reduction to acc,
-/// then uncompute tmp_ext via gate-level inverse.
-pub(crate) fn squaring_add_to_acc_schoolbook(b: &mut B, acc: &[QubitId], x: &[QubitId], p: U256) {
-    let n = acc.len();
-    debug_assert_eq!(n, 256);
-    debug_assert_eq!(x.len(), n);
-
-    let tmp_ext = b.alloc_qubits(2 * n);
-    schoolbook_square_symmetric_lowq(b, x, &tmp_ext);
-
-    let lo: Vec<QubitId> = tmp_ext[0..n].to_vec();
-    let hi: Vec<QubitId> = tmp_ext[n..2 * n].to_vec();
-    mod_add_qq_fast(b, acc, &lo, p);
-    mod_add_qq_fast(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace_fast(b, &hi, p);
-    }
-    mod_add_qq_fast(b, acc, &hi, p);
-    for _ in 0..2 {
-        mod_double_inplace_fast(b, &hi, p);
-    }
-    mod_sub_qq_fast(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace_fast(b, &hi, p);
-    }
-    mod_add_qq_fast(b, acc, &hi, p);
-    let (spill, flag_inv, ovf) = mod_shift_left_by_k(b, &hi, p, 22);
-    mod_add_qq(b, acc, &hi, p);
-    mod_shift_right_by_k(b, &hi, p, 22, spill, flag_inv, ovf);
-    for _ in 0..10 {
-        mod_halve_inplace_fast(b, &hi, p);
-    }
-
-    schoolbook_square_symmetric_lowq_inverse(b, x, &tmp_ext);
-    b.free_vec(&tmp_ext);
-}
-
-pub(crate) fn squaring_add_to_acc_schoolbook_phase_clean(b: &mut B, acc: &[QubitId], x: &[QubitId], p: U256) {
-    let n = acc.len();
-    debug_assert_eq!(n, 256);
-    debug_assert_eq!(x.len(), n);
-
-    let tmp_ext = b.alloc_qubits(2 * n);
-    schoolbook_square_symmetric_nohmr(b, x, &tmp_ext);
-
-    let lo: Vec<QubitId> = tmp_ext[0..n].to_vec();
-    let hi: Vec<QubitId> = tmp_ext[n..2 * n].to_vec();
-    mod_add_qq(b, acc, &lo, p);
-    mod_add_qq(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace(b, &hi, p);
-    }
-    mod_add_qq(b, acc, &hi, p);
-    for _ in 0..2 {
-        mod_double_inplace(b, &hi, p);
-    }
-    mod_sub_qq(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace(b, &hi, p);
-    }
-    mod_add_qq(b, acc, &hi, p);
-    let (spill, flag_inv, ovf) = mod_shift_left_by_k(b, &hi, p, 22);
-    mod_add_qq(b, acc, &hi, p);
-    mod_shift_right_by_k(b, &hi, p, 22, spill, flag_inv, ovf);
-    for _ in 0..10 {
-        mod_halve_inplace(b, &hi, p);
-    }
-
-    schoolbook_square_symmetric_nohmr_inverse(b, x, &tmp_ext);
-    b.free_vec(&tmp_ext);
-}
-
-pub(crate) fn squaring_sub_from_acc_schoolbook_phase_clean(
-    b: &mut B,
-    acc: &[QubitId],
-    x: &[QubitId],
-    p: U256,
-) {
-    let n = acc.len();
-    debug_assert_eq!(n, 256);
-    debug_assert_eq!(x.len(), n);
-
-    let tmp_ext = b.alloc_qubits(2 * n);
-    schoolbook_square_symmetric_nohmr(b, x, &tmp_ext);
-
-    let lo: Vec<QubitId> = tmp_ext[0..n].to_vec();
-    let hi: Vec<QubitId> = tmp_ext[n..2 * n].to_vec();
-    mod_sub_qq(b, acc, &lo, p);
-    mod_sub_qq(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace(b, &hi, p);
-    }
-    mod_sub_qq(b, acc, &hi, p);
-    for _ in 0..2 {
-        mod_double_inplace(b, &hi, p);
-    }
-    mod_add_qq(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace(b, &hi, p);
-    }
-    mod_sub_qq(b, acc, &hi, p);
-    let (spill, flag_inv, ovf) = mod_shift_left_by_k(b, &hi, p, 22);
-    mod_sub_qq(b, acc, &hi, p);
-    mod_shift_right_by_k(b, &hi, p, 22, spill, flag_inv, ovf);
-    for _ in 0..10 {
-        mod_halve_inplace(b, &hi, p);
-    }
-
-    schoolbook_square_symmetric_nohmr_inverse(b, x, &tmp_ext);
-    b.free_vec(&tmp_ext);
-}
-
-/// Schoolbook squarer with Bennett uncompute. For squaring `tmp_ext = x*x`
 /// (2n bits, no mod reduction), then sub from acc with on-the-fly Solinas
 /// reduction, then uncompute tmp_ext via gate-level inverse. Saves ~170k
 /// CCX vs walk-x squaring (459k → 289k) by avoiding 256 expensive
@@ -506,209 +543,4 @@ pub(crate) fn squaring_sub_from_acc_schoolbook_lowq_shift22(
         schoolbook_square_symmetric_lowq_inverse(b, x, &tmp_ext);
     }
     b.free_vec(&tmp_ext);
-}
-
-/// Schoolbook: tmp_ext (2n bits) += x * x. Each row i adds (x[i] AND x)
-/// shifted by i, captured in n+1 bits to absorb carry into position i+n.
-pub(crate) fn schoolbook_square_into(b: &mut B, x: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    debug_assert_eq!(tmp_ext.len(), 2 * n);
-    for i in 0..n {
-        let row = b.alloc_qubits(n);
-        for k in 0..n {
-            b.ccx(x[i], x[k], row[k]);
-        }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
-        let slice: Vec<QubitId> = tmp_ext[i..i + n + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_add_fast(b, &row_padded, &slice, c_in);
-        b.free(c_in);
-        b.free(pad);
-        // Unload row via measurement-based AND uncompute.
-        for k in 0..n {
-            let m = b.alloc_bit();
-            b.hmr(row[k], m);
-            b.cz_if(x[i], x[k], m);
-        }
-        b.free_vec(&row);
-    }
-}
-
-
-pub(crate) fn schoolbook_rect_mul_into(b: &mut B, x: &[QubitId], y: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    let m = y.len();
-    debug_assert!(tmp_ext.len() >= n + m);
-    for i in 0..m {
-        let row = b.alloc_qubits(n);
-        for k in 0..n {
-            b.ccx(y[i], x[k], row[k]);
-        }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
-        let slice: Vec<QubitId> = tmp_ext[i..i + n + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_add_fast(b, &row_padded, &slice, c_in);
-        b.free(c_in);
-        b.free(pad);
-        for k in 0..n {
-            let m = b.alloc_bit();
-            b.hmr(row[k], m);
-            b.cz_if(y[i], x[k], m);
-        }
-        b.free_vec(&row);
-    }
-}
-
-pub(crate) fn schoolbook_rect_mul_into_inverse(b: &mut B, x: &[QubitId], y: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    let m = y.len();
-    debug_assert!(tmp_ext.len() >= n + m);
-    for i in (0..m).rev() {
-        let row = b.alloc_qubits(n);
-        for k in 0..n {
-            b.ccx(y[i], x[k], row[k]);
-        }
-        let pad = b.alloc_qubit();
-        let mut row_padded = row.clone();
-        row_padded.push(pad);
-        let slice: Vec<QubitId> = tmp_ext[i..i + n + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_sub_fast(b, &row_padded, &slice, c_in);
-        b.free(c_in);
-        b.free(pad);
-        for k in 0..n {
-            let m = b.alloc_bit();
-            b.hmr(row[k], m);
-            b.cz_if(y[i], x[k], m);
-        }
-        b.free_vec(&row);
-    }
-}
-
-pub(crate) fn schoolbook_rect_mul_into_addsub(b: &mut B, x: &[QubitId], y: &[QubitId], tmp_ext: &[QubitId]) {
-    let n = x.len();
-    let m = y.len();
-    debug_assert!(tmp_ext.len() >= n + m);
-
-    let low = b.alloc_qubit();
-    let mut wide: Vec<QubitId> = Vec::with_capacity(n + m + 1);
-    wide.push(low);
-    wide.extend_from_slice(&tmp_ext[..n + m]);
-
-    for k in 0..m {
-        let slice: Vec<QubitId> = wide[k..k + n + 1].to_vec();
-        controlled_add_subtract_fast(b, x, &slice, y[k]);
-    }
-
-    // Rectangular Litinski correction:
-    // intermediate = 2xy + 2^(n+m) - 2^m*x - 2^n*(y+1) + x.
-    // Apply +2^n*(y+1) + 2^m*x - 2^(n+m) - x.
-    {
-        let pad = b.alloc_qubit();
-        let mut y_ext = y.to_vec();
-        y_ext.push(pad);
-        let slice: Vec<QubitId> = wide[n..n + m + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        b.x(c_in);
-        cuccaro_add_fast(b, &y_ext, &slice, c_in);
-        b.x(c_in);
-        b.free(c_in);
-        b.free(pad);
-    }
-
-    b.x(wide[n + m]);
-
-    {
-        let mut x_ext: Vec<QubitId> = x.to_vec();
-        while x_ext.len() < n + m + 1 {
-            x_ext.push(b.alloc_qubit());
-        }
-        let c_in = b.alloc_qubit();
-        cuccaro_sub(b, &x_ext, &wide, c_in);
-        b.free(c_in);
-        for _ in n..n + m + 1 {
-            let q = x_ext.pop().unwrap();
-            b.free(q);
-        }
-    }
-
-    {
-        let pad = b.alloc_qubit();
-        let mut x_ext = x.to_vec();
-        x_ext.push(pad);
-        let slice: Vec<QubitId> = wide[m..m + n + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_add_fast(b, &x_ext, &slice, c_in);
-        b.free(c_in);
-        b.free(pad);
-    }
-
-    b.free(low);
-}
-
-pub(crate) fn schoolbook_rect_mul_into_addsub_inverse(
-    b: &mut B,
-    x: &[QubitId],
-    y: &[QubitId],
-    tmp_ext: &[QubitId],
-) {
-    let n = x.len();
-    let m = y.len();
-    debug_assert!(tmp_ext.len() >= n + m);
-
-    let low = b.alloc_qubit();
-    let mut wide: Vec<QubitId> = Vec::with_capacity(n + m + 1);
-    wide.push(low);
-    wide.extend_from_slice(&tmp_ext[..n + m]);
-
-    {
-        let pad = b.alloc_qubit();
-        let mut x_ext = x.to_vec();
-        x_ext.push(pad);
-        let slice: Vec<QubitId> = wide[m..m + n + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        cuccaro_sub_fast(b, &x_ext, &slice, c_in);
-        b.free(c_in);
-        b.free(pad);
-    }
-
-    {
-        let mut x_ext: Vec<QubitId> = x.to_vec();
-        while x_ext.len() < n + m + 1 {
-            x_ext.push(b.alloc_qubit());
-        }
-        let c_in = b.alloc_qubit();
-        cuccaro_add(b, &x_ext, &wide, c_in);
-        b.free(c_in);
-        for _ in n..n + m + 1 {
-            let q = x_ext.pop().unwrap();
-            b.free(q);
-        }
-    }
-
-    b.x(wide[n + m]);
-
-    {
-        let pad = b.alloc_qubit();
-        let mut y_ext = y.to_vec();
-        y_ext.push(pad);
-        let slice: Vec<QubitId> = wide[n..n + m + 1].to_vec();
-        let c_in = b.alloc_qubit();
-        b.x(c_in);
-        cuccaro_sub_fast(b, &y_ext, &slice, c_in);
-        b.x(c_in);
-        b.free(c_in);
-        b.free(pad);
-    }
-
-    for k in (0..m).rev() {
-        let slice: Vec<QubitId> = wide[k..k + n + 1].to_vec();
-        controlled_add_subtract_fast_inverse(b, x, &slice, y[k]);
-    }
-
-    b.free(low);
 }

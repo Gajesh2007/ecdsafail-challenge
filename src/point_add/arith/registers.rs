@@ -1,9 +1,3 @@
-//! Register loading and width management.
-//!
-//! Loads / unloads classical constants and bit-slices into qubit registers
-//! (`load_const`/`unload_const`, `load_bits`/`unload_bits`), extends a register
-//! to `n+1` bits (`ext_reg`/`unext_reg`), and provides small bit accessors
-//! (`bit`, `highest_set_bit`).
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]

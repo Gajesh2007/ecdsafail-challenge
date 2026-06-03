@@ -1,8 +1,8 @@
-//! `modular::scale` — verbatim split of the original `modular` module.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
 use super::*;
+use crate::point_add::venting;
 
 pub(crate) fn mod_add_double_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
     // acc := acc + 2*bits mod p. Reuse a single loaded copy of the classical
@@ -13,39 +13,6 @@ pub(crate) fn mod_add_double_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U
     mod_halve_inplace_fast(b, &a, p);
     unload_bits(b, &a, bits);
 }
-
-pub(crate) fn mod_sub_double_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
-    // acc := acc - 2*bits mod p. This is the exact subtract twin of
-    // mod_add_double_qb and is used by the Round84 x-tail component.
-    let a = load_bits(b, bits);
-    mod_double_inplace_fast(b, &a, p);
-    mod_sub_qq_fast(b, acc, &a, p);
-    mod_halve_inplace_fast(b, &a, p);
-    unload_bits(b, &a, bits);
-}
-
-pub(crate) fn mod_add_double_qb_phase_clean(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U256) {
-    let a = load_bits(b, bits);
-    mod_double_inplace(b, &a, p);
-    mod_add_qq(b, acc, &a, p);
-    mod_halve_inplace(b, &a, p);
-    unload_bits(b, &a, bits);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  Modular multiplication
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Shift-and-add, MSB-to-LSB. `acc += x*y mod p`. Iteration:
-//
-//     for i from n-1 down to 0:
-//         acc := 2*acc mod p
-//         if y[i]:  acc := acc + x mod p
-//
-// For q*q mul, y[i] is a qubit; we implement the conditional add by
-// CCX-copying x (gated on y[i]) into a temporary, adding, and
-// uncopying. For q*b mul, y[i] is a classical bit and the copy is
-// done with CX_if gates.
 
 /// `v := 2*v mod p`. In-place via shift-left (swap cascade) + Solinas-style
 /// mod reduction. For secp256k1, p = 2^n - c with c = 2^32 + 977, so
@@ -164,15 +131,6 @@ pub(crate) fn mod_double_inplace_direct_const_fast(b: &mut B, v: &[QubitId], p: 
 pub(crate) fn mod_double_no_corr(b: &mut B, v: &[QubitId]) {
     let n = v.len();
     for i in (0..n - 1).rev() {
-        b.swap(v[i], v[i + 1]);
-    }
-}
-
-/// `v := v/2` assuming v[0] = 0 (v was even after corresponding no-corr double).
-/// Exact inverse of `mod_double_no_corr`. 0 Toffoli.
-pub(crate) fn mod_halve_no_corr(b: &mut B, v: &[QubitId]) {
-    let n = v.len();
-    for i in 0..n - 1 {
         b.swap(v[i], v[i + 1]);
     }
 }
@@ -415,52 +373,6 @@ pub(crate) fn mod_shift_left_by_k_lowq(
     (spill, flag_inv, ovf)
 }
 
-pub(crate) fn mod_shift_left_by_k_lowq_with_dirty(
-    b: &mut B,
-    v: &[QubitId],
-    p: U256,
-    k: usize,
-    dirty_src: &[QubitId],
-) -> (Vec<QubitId>, QubitId, QubitId) {
-    let n = v.len();
-    debug_assert_eq!(n, 256);
-    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1));
-
-    let spill = b.alloc_qubits(k);
-    let ovf = b.alloc_qubit();
-    let flag_inv = b.alloc_qubit();
-
-    for shift_i in 0..k {
-        b.swap(v[n - 1], spill[k - 1 - shift_i]);
-        for i in (0..n - 1).rev() {
-            b.swap(v[i], v[i + 1]);
-        }
-    }
-
-    let mut v_ext = v.to_vec();
-    v_ext.push(ovf);
-    let cuccaro_op = |b: &mut B, pos: usize, is_sub: bool| {
-        let v_slice: Vec<QubitId> = v_ext[pos..n + 1].to_vec();
-        spill_qoffset_addsub_lowq(b, &spill, &v_slice, is_sub, Some(dirty_src));
-    };
-    cuccaro_op(b, 0, false);
-    cuccaro_op(b, 4, false);
-    cuccaro_op(b, 6, true);
-    cuccaro_op(b, 10, false);
-    cuccaro_op(b, 32, false);
-
-    add_nbit_const(b, &v_ext, c);
-    b.x(ovf);
-    b.cx(ovf, flag_inv);
-    b.x(ovf);
-    csub_nbit_const(b, &v_ext, c, flag_inv);
-    b.x(flag_inv);
-    b.cx(flag_inv, ovf);
-    b.x(flag_inv);
-
-    (spill, flag_inv, ovf)
-}
-
 pub(crate) fn mod_shift_right_by_k_lowq(
     b: &mut B,
     v: &[QubitId],
@@ -506,55 +418,6 @@ pub(crate) fn mod_shift_right_by_k_lowq(
             b.cx(spill[i], padded[i]);
         }
         b.free_vec(&padded);
-    };
-    cuccaro_op(b, 32, true);
-    cuccaro_op(b, 10, true);
-    cuccaro_op(b, 6, false);
-    cuccaro_op(b, 4, true);
-    cuccaro_op(b, 0, true);
-
-    for shift_i in (0..k).rev() {
-        for i in 0..n - 1 {
-            b.swap(v[i], v[i + 1]);
-        }
-        b.swap(v[n - 1], spill[k - 1 - shift_i]);
-    }
-
-    b.free(ovf);
-    b.free_vec(&spill);
-}
-
-pub(crate) fn mod_shift_right_by_k_lowq_with_dirty(
-    b: &mut B,
-    v: &[QubitId],
-    p: U256,
-    k: usize,
-    spill: Vec<QubitId>,
-    flag_inv: QubitId,
-    ovf: QubitId,
-    dirty_src: &[QubitId],
-) {
-    let n = v.len();
-    debug_assert_eq!(n, 256);
-    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1));
-
-    let mut v_ext = v.to_vec();
-    v_ext.push(ovf);
-
-    b.x(flag_inv);
-    b.cx(flag_inv, ovf);
-    b.x(flag_inv);
-    cadd_nbit_const(b, &v_ext, c, flag_inv);
-
-    b.x(ovf);
-    b.cx(ovf, flag_inv);
-    b.x(ovf);
-    sub_nbit_const(b, &v_ext, c);
-    b.free(flag_inv);
-
-    let cuccaro_op = |b: &mut B, pos: usize, is_sub: bool| {
-        let v_slice: Vec<QubitId> = v_ext[pos..n + 1].to_vec();
-        spill_qoffset_addsub_lowq(b, &spill, &v_slice, is_sub, Some(dirty_src));
     };
     cuccaro_op(b, 32, true);
     cuccaro_op(b, 10, true);
@@ -643,10 +506,4 @@ pub(crate) fn mod_halve_inplace_fast_with_dirty(
     }
     b.swap(v[n - 1], ovf);
     b.free(ovf);
-}
-
-/// `v := v/2 mod p`. Gate-inverse of `mod_double_inplace`.
-pub(crate) fn mod_halve_inplace(b: &mut B, v: &[QubitId], p: U256) {
-    let v_copy: Vec<QubitId> = v.to_vec();
-    emit_inverse(b, move |b| mod_double_inplace(b, &v_copy, p));
 }

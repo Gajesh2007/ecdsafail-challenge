@@ -1,4 +1,3 @@
-//! `adder::nbit` — verbatim split of the original `adder` module.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
@@ -61,9 +60,4 @@ pub(crate) fn sub_nbit_qq(b: &mut B, a: &[QubitId], acc: &[QubitId]) {
     let c_in = b.alloc_qubit();
     cuccaro_sub(b, a, acc, c_in);
     b.free(c_in);
-}
-
-pub(crate) fn sub_nbit_qq_borrowed_cin(b: &mut B, a: &[QubitId], acc: &[QubitId], c_in: QubitId) {
-    assert_eq!(a.len(), acc.len());
-    cuccaro_sub(b, a, acc, c_in);
 }

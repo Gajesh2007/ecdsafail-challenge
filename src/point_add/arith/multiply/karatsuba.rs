@@ -1,69 +1,41 @@
-//! `multiply::karatsuba2` — verbatim split of the original `multiply` module.
-
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
 use super::*;
 
-pub(crate) fn mod_mul_write_into_zero_acc_karatsuba2(
-    b: &mut B,
-    acc: &[QubitId],
-    x: &[QubitId],
-    y: &[QubitId],
-    p: U256,
-) {
-    let n = acc.len();
-    debug_assert_eq!(n, 256);
-    let h = n / 2;
-    let h2 = h / 2;
-    let tmp_ext = b.alloc_qubits(2 * n);
-    let z1_reg = b.alloc_qubits(2 * (h + 1));
-    let z1_inner_a = b.alloc_qubits(2 * (h2 + 1));
-    let z1_inner_b = b.alloc_qubits(2 * (h2 + 1));
-    karatsuba_forward_2level(b, x, y, &tmp_ext, &z1_reg, &z1_inner_a, &z1_inner_b);
 
-    let lo: Vec<QubitId> = tmp_ext[0..n].to_vec();
-    let hi: Vec<QubitId> = tmp_ext[n..2 * n].to_vec();
-    mod_add_qq_fast_from_zero(b, acc, &lo, p);
-    mod_add_qq_fast(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace_fast(b, &hi, p);
-    }
-    mod_add_qq_fast(b, acc, &hi, p);
-    for _ in 0..2 {
-        mod_double_inplace_fast(b, &hi, p);
-    }
-    mod_sub_qq_fast(b, acc, &hi, p);
-    for _ in 0..4 {
-        mod_double_inplace_fast(b, &hi, p);
-    }
-    mod_add_qq_fast(b, acc, &hi, p);
-    let (spill, flag_inv, ovf) = mod_shift_left_by_k(b, &hi, p, 22);
-    mod_add_qq(b, acc, &hi, p);
-    mod_shift_right_by_k(b, &hi, p, 22, spill, flag_inv, ovf);
-    for _ in 0..10 {
-        mod_halve_inplace_fast(b, &hi, p);
-    }
+// ─── merged from karatsuba1.rs ───
 
-    karatsuba_inverse_2level(b, x, y, &tmp_ext, &z1_reg, &z1_inner_a, &z1_inner_b);
-    b.free_vec(&z1_inner_b);
-    b.free_vec(&z1_inner_a);
-    b.free_vec(&z1_reg);
-    b.free_vec(&tmp_ext);
+// ═══════════════════════════════════════════════════════════════════════════
+//  1-level Karatsuba multiplication
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub(crate) fn karatsuba_half_sum_compute(b: &mut B, lo: &[QubitId], hi: &[QubitId], acc: &[QubitId]) {
+    let h = lo.len();
+    debug_assert_eq!(h, hi.len());
+    debug_assert_eq!(acc.len(), h + 1);
+    for i in 0..h {
+        b.cx(lo[i], acc[i]);
+    }
+    let hi_pad = b.alloc_qubit();
+    let mut hi_ext = hi.to_vec();
+    hi_ext.push(hi_pad);
+    add_nbit_qq_fast(b, &hi_ext, acc);
+    b.free(hi_pad);
 }
 
-/// acc -= x * y mod p via Karatsuba. Not squaring (x ≠ y).
-pub(crate) fn mod_mul_sub_into_acc_karatsuba(
-    b: &mut B,
-    acc: &[QubitId],
-    x: &[QubitId],
-    y: &[QubitId],
-    p: U256,
-) {
-    // Negate x in place, run karatsuba add, then restore x.
-    mod_neg_inplace_fast(b, x, p);
-    mod_mul_add_into_acc_karatsuba(b, acc, x, y, p);
-    mod_neg_inplace_fast(b, x, p);
+pub(crate) fn karatsuba_half_sum_uncompute(b: &mut B, lo: &[QubitId], hi: &[QubitId], acc: &[QubitId]) {
+    let h = lo.len();
+    let hi_pad = b.alloc_qubit();
+    let mut hi_ext = hi.to_vec();
+    hi_ext.push(hi_pad);
+    sub_nbit_qq_fast(b, &hi_ext, acc);
+    b.free(hi_pad);
+    for i in 0..h {
+        b.cx(lo[i], acc[i]);
+    }
 }
+
+// ─── merged from karatsuba2.rs ───
 
 /// Squaring-aware 1-level Karatsuba variant of [`squaring_sub_from_acc_schoolbook`].
 ///

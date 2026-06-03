@@ -1,8 +1,3 @@
-//! Modular arithmetic over the secp256k1 (Solinas) prime field.
-//!
-//! Modular addition / subtraction (including vented, low-peak variants),
-//! negation, doubling, halving, and shift-by-k mod p, together with their
-//! controlled forms and the conditional-swap helper.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]

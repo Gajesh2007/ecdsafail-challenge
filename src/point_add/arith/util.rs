@@ -1,22 +1,8 @@
-//! Assorted arithmetic helpers that do not fit the other buckets.
-//!
-//! Power-of-two reductions, the secp256k1 reference curve, alt-seed correctness
-//! probes, environment defaulting, and `B`-from-ops construction.
 
 #![allow(unused_imports, dead_code, clippy::all)]
 #[allow(unused_imports)]
 use super::*;
 
-
-/// Classical: compute `2^k mod p`.
-pub(crate) fn pow_mod_2_k(p: U256, k: usize) -> U256 {
-    let mut r = U256::from(1);
-    let two = U256::from(2);
-    for _ in 0..k {
-        r = mulmod(r, two, p);
-    }
-    r
-}
 
 pub(crate) fn secp256k1_curve() -> WeierstrassEllipticCurve {
     WeierstrassEllipticCurve {
@@ -234,27 +220,6 @@ pub(crate) fn run_alt_seed_checks(ops: &[Op]) {
         n_seeds,
         ALT_SEED_SHOTS,
     );
-}
-
-pub(crate) fn source_live_product_hmr_keep_measured_conditions_enabled() -> bool {
-    std::env::var("PA_SOURCE_LIVE_PRODUCT_HMR_KEEP_MEASURED_CONDITIONS")
-        .ok()
-        .as_deref()
-        == Some("1")
-}
-
-pub(crate) fn source_live_product_hmr_direct_forward_clean_enabled() -> bool {
-    std::env::var("PA_SOURCE_LIVE_PRODUCT_HMR_DIRECT_FORWARD_CLEAN")
-        .ok()
-        .as_deref()
-        == Some("1")
-}
-
-pub(crate) fn low_q_output_side_second_inverse_qtail_pa_enabled() -> bool {
-    std::env::var("LOW_Q_OUTPUT_SIDE_SECOND_INVERSE_QTAIL_PA")
-        .ok()
-        .as_deref()
-        == Some("1")
 }
 
 pub(crate) fn builder_from_ops(ops: Vec<Op>) -> B {
