@@ -266,40 +266,6 @@ pub(crate) fn with_gt_lowq<F: FnOnce(&mut B)>(
     cmp_lt_into(b, v, u, flag);
 }
 
-/// Run `body` with `flag` holding (v == 0), then uncompute. Single forward
-/// OR chain + body + single inverse OR chain — half the cost of two
-/// `cmp_eq_zero_into` calls.
-pub(crate) fn with_eq_zero<F: FnOnce(&mut B)>(b: &mut B, v: &[QubitId], flag: QubitId, body: F) {
-    let n = v.len();
-    assert!(n > 0);
-    if n == 1 {
-        b.x(v[0]);
-        b.cx(v[0], flag);
-        body(b);
-        b.cx(v[0], flag);
-        b.x(v[0]);
-        return;
-    }
-    let or_chain: Vec<QubitId> = b.alloc_qubits(n - 1);
-    or_step(b, v[0], v[1], or_chain[0]);
-    for i in 1..n - 1 {
-        or_step(b, or_chain[i - 1], v[i + 1], or_chain[i]);
-    }
-    // or_chain[n-2] = (v != 0). Take complement for "== 0".
-    b.x(or_chain[n - 2]);
-    b.cx(or_chain[n - 2], flag);
-    b.x(or_chain[n - 2]);
-    body(b);
-    b.x(or_chain[n - 2]);
-    b.cx(or_chain[n - 2], flag);
-    b.x(or_chain[n - 2]);
-    for i in (1..n - 1).rev() {
-        or_step(b, or_chain[i - 1], v[i + 1], or_chain[i]);
-    }
-    or_step(b, v[0], v[1], or_chain[0]);
-    b.free_vec(&or_chain);
-}
-
 /// flag ^= (u < v).  Non-destructive on u and v.
 ///
 /// Uses a MAJ-only carry chain instead of the full sub+add pattern.
@@ -342,42 +308,6 @@ pub(crate) fn cmp_lt_into(b: &mut B, u: &[QubitId], v: &[QubitId], flag: QubitId
     }
 
     b.free(c_in);
-}
-
-/// flag ^= (v != 0). Computes OR of all bits of v into a scratch ancilla,
-/// CXs into flag, then properly uncomputes the scratch.
-///
-/// We use the simple chain: `or[0] = v[0]`, `or[i] = or[i-1] OR v[i]`.
-/// OR via de Morgan: `or[i] = NOT((NOT or[i-1]) AND (NOT v[i]))`, i.e.
-///   x(or[i-1]); x(v[i]); ccx(or[i-1], v[i], or[i]); x(or[i]);
-///   x(v[i]); x(or[i-1]);
-/// Each `or[i]` is a fresh ancilla. We compute the chain, CX `or[n-1]`
-/// into `flag`, then reverse the chain to return every ancilla to |0⟩.
-pub(crate) fn cmp_neq_zero_into(b: &mut B, v: &[QubitId], flag: QubitId) {
-    let n = v.len();
-    assert!(n > 0);
-    if n == 1 {
-        b.cx(v[0], flag);
-        return;
-    }
-
-    let or_chain: Vec<QubitId> = b.alloc_qubits(n - 1);
-    // or_chain[0] = v[0] OR v[1]
-    or_step(b, v[0], v[1], or_chain[0]);
-    for i in 1..n - 1 {
-        or_step(b, or_chain[i - 1], v[i + 1], or_chain[i]);
-    }
-
-    // flag ^= or_chain[n-2]
-    b.cx(or_chain[n - 2], flag);
-
-    // Uncompute.
-    for i in (1..n - 1).rev() {
-        or_step(b, or_chain[i - 1], v[i + 1], or_chain[i]);
-    }
-    or_step(b, v[0], v[1], or_chain[0]);
-
-    b.free_vec(&or_chain);
 }
 
 /// out ^= (x OR y). `out` starts 0. Uses the de-Morgan form:
@@ -451,12 +381,6 @@ pub(crate) fn mcx3_polar(
     if !p1 {
         b.x(c1);
     }
-}
-
-/// flag ^= (v == 0).  Uses cmp_neq_zero_into internally.
-pub(crate) fn cmp_eq_zero_into(b: &mut B, v: &[QubitId], flag: QubitId) {
-    b.x(flag);
-    cmp_neq_zero_into(b, v, flag);
 }
 
 /// Controlled (`target ^= ctrl & (u < v)`) borrow-comparator that takes its

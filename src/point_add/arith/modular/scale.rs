@@ -14,52 +14,6 @@ pub(crate) fn mod_add_double_qb(b: &mut B, acc: &[QubitId], bits: &[BitId], p: U
     unload_bits(b, &a, bits);
 }
 
-/// `v := 2*v mod p`. In-place via shift-left (swap cascade) + Solinas-style
-/// mod reduction. For secp256k1, p = 2^n - c with c = 2^32 + 977, so
-/// `T - p = T + c - 2^n`. The reduction becomes: add c, branch on the top
-/// bit of the (n+1)-wide shifted register — if set, clear it; else undo
-/// the add. Costs two full (n+1)-wide Cuccaro adds instead of three.
-pub(crate) fn mod_double_inplace(b: &mut B, v: &[QubitId], p: U256) {
-    let n = v.len();
-    let ovf = b.alloc_qubit();
-
-    // Shift left by 1 via swaps: introduces a 0 into v[0], pushes v[n-1] → ovf.
-    b.swap(v[n - 1], ovf);
-    for i in (0..n - 1).rev() {
-        b.swap(v[i], v[i + 1]);
-    }
-
-    let mut v_ext: Vec<QubitId> = v.to_vec();
-    v_ext.push(ovf);
-
-    // c = 2^n - p (= 2^32 + 977 for secp256k1). Assumes n == 256 so that
-    // 2^n wraps cleanly in U256::MAX + 1 arithmetic.
-    debug_assert_eq!(n, 256);
-    let c = U256::MAX.wrapping_sub(p).wrapping_add(U256::from(1));
-
-    // S := T + c. Fits in n+1 bits.
-    add_nbit_const(b, &v_ext, c);
-
-    // flag := (S >= 2^n) = S[n]. S[n]==1 iff we need the reduction.
-    let flag = b.alloc_qubit();
-    b.cx(ovf, flag);
-
-    // If flag=0, undo the add (we didn't need to reduce).
-    b.x(flag);
-    csub_nbit_const(b, &v_ext, c, flag);
-    b.x(flag);
-
-    // If flag=1, clear the top bit (drops the 2^n from S, giving T - p).
-    b.cx(flag, ovf);
-
-    // Uncompute flag via parity: flag == v[0] after the operation.
-    // Case flag=0: v = T = 2*v_orig (even) → v[0]=0.
-    // Case flag=1: v = T - p. T even, p odd → v is odd → v[0]=1.
-    b.cx(v[0], flag);
-    b.free(flag);
-    b.free(ovf);
-}
-
 pub(crate) fn mod_double_inplace_fast(b: &mut B, v: &[QubitId], p: U256) {
     mod_double_inplace_fast_with_dirty(b, v, p, None)
 }

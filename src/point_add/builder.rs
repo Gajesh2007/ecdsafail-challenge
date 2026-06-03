@@ -472,52 +472,6 @@ impl B {
         op.c_condition = cond;
         self.push_op(op);
     }
-    pub(crate) fn cx_if(&mut self, ctrl: QubitId, tgt: QubitId, cond: BitId) {
-        if ctrl == tgt {
-            panic!(
-                "invalid conditional CX with aliased control/target {:?}",
-                ctrl
-            );
-        }
-        let mut op = Op::empty();
-        op.kind = OperationType::CX;
-        op.q_control1 = ctrl;
-        op.q_target = tgt;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn ccx_if(&mut self, c1: QubitId, c2: QubitId, tgt: QubitId, cond: BitId) {
-        if c1 == c2 {
-            if c1 != tgt {
-                self.cx_if(c1, tgt, cond);
-            }
-            return;
-        }
-        if c1 == tgt || c2 == tgt {
-            panic!(
-                "invalid conditional CCX with target aliased to a control: {:?}, {:?}, {:?}",
-                c1, c2, tgt
-            );
-        }
-        let mut op = Op::empty();
-        op.kind = OperationType::CCX;
-        op.q_control2 = c1;
-        op.q_control1 = c2;
-        op.q_target = tgt;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn push_condition(&mut self, cond: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::PushCondition;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn pop_condition(&mut self) {
-        let mut op = Op::empty();
-        op.kind = OperationType::PopCondition;
-        self.push_op(op);
-    }
     // ── Measurement / phase / classical bit ops ──
     pub(crate) fn hmr(&mut self, q: QubitId, c: BitId) {
         let mut op = Op::empty();
@@ -529,24 +483,6 @@ impl B {
     pub(crate) fn neg(&mut self) {
         let mut op = Op::empty();
         op.kind = OperationType::Neg;
-        self.push_op(op);
-    }
-    pub(crate) fn bit_invert(&mut self, c: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::BitInvert;
-        op.c_target = c;
-        self.push_op(op);
-    }
-    pub(crate) fn bit_store0(&mut self, c: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::BitStore0;
-        op.c_target = c;
-        self.push_op(op);
-    }
-    pub(crate) fn bit_store1(&mut self, c: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::BitStore1;
-        op.c_target = c;
         self.push_op(op);
     }
     // ── Classically-conditioned variants for all remaining gates ──
@@ -593,68 +529,5 @@ impl B {
         op.q_target = tgt;
         op.c_condition = cond;
         self.push_op(op);
-    }
-    pub(crate) fn swap_if(&mut self, a: QubitId, b: QubitId, cond: BitId) {
-        if a == b {
-            return;
-        }
-        let mut op = Op::empty();
-        op.kind = OperationType::Swap;
-        op.q_control1 = a;
-        op.q_target = b;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn neg_if(&mut self, cond: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::Neg;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn hmr_if(&mut self, q: QubitId, c: BitId, cond: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::Hmr;
-        op.q_target = q;
-        op.c_target = c;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn bit_invert_if(&mut self, c: BitId, cond: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::BitInvert;
-        op.c_target = c;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn bit_store0_if(&mut self, c: BitId, cond: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::BitStore0;
-        op.c_target = c;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn bit_store1_if(&mut self, c: BitId, cond: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::BitStore1;
-        op.c_target = c;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    pub(crate) fn r_if(&mut self, q: QubitId, cond: BitId) {
-        let mut op = Op::empty();
-        op.kind = OperationType::R;
-        op.q_target = q;
-        op.c_condition = cond;
-        self.push_op(op);
-    }
-    // ── Gidney measurement-based AND uncomputation (convenience) ──
-    // Uncomputes `tgt = c1 AND c2` using HMR + phase feedback.
-    // Cost: 0 Toffoli (1 HMR + 1 classically-conditioned CZ).
-    // Precondition: tgt holds (c1 AND c2) computed by a prior CCX.
-    pub(crate) fn uncompute_and(&mut self, c1: QubitId, c2: QubitId, tgt: QubitId) {
-        let m = self.alloc_bit();
-        self.hmr(tgt, m);
-        self.cz_if(c1, c2, m);
-        self.neg_if(m);
     }
 }
